@@ -240,4 +240,68 @@ Ghi từ ý tưởng ban đầu — xếp sau bug kéo.
    widget ~30MB, phải nạp thumbnail đúng kích thước, và cần sandbox bookmark.
    *→ Với kiến trúc cửa sổ AppKit hiện tại thì không bị giới hạn này.*
 4. **Khung ảnh**: Polaroid, film strip 35mm, glassmorphism, viền theo màu chủ đạo.
+   *→ Đã làm 4 kiểu: Bóng đổ / Polaroid / Phim 35mm / Kính mờ.*
 5. **Layout lai**: ảnh + đồng hồ tối giản, ảnh + lịch tháng, ảnh + châm ngôn.
+
+---
+
+## BÀI HỌC ĐO HIỆU NĂNG (sau đợt tối ưu 13/10)
+
+### 1. ĐỪNG TIN `ps rss` — đó là bẫy
+
+Tôi đo bằng `ps rss` suốt buổi và tưởng app phình từ 26 MB lên 109 MB rồi
+săn tìm "rò rỉ". Hoá ra:
+
+| Cách đo | Cho ra |
+|---|---|
+| `ps rss` | 64 MB |
+| `vmmap` → `Physical footprint` | **26 MB** |
+
+RSS đếm cả trang bộ nhớ dùng chung với WindowServer và các framework hệ thống
+— cộng vào đó là phần có thể thu hồi. Muốn biết máy thật sự mất bao nhiêu cho
+app thì phải đọc `phys_footprint`:
+
+```
+vmmap -summary <pid> | awk '/Physical footprint:/{print $3}'
+```
+
+Hệ quả: **một số thứ tôi sửa theo cảm tính hoá ra không có ích gì.** Bản "tối ưu"
+giải mã 2 bước + `CGContext` + vùng đệm tái dùng làm RAM *tệ hơn* bản gốc
+(109 MB vs 91 MB theo RSS). Đã hoàn nguyên hết. Chỉ giữ lại những gì đo được là
+có ích.
+
+### 2. Test cô lập có thể đảo ngược kết luận
+
+Vòng lặp test gọi `widget.show()` liên tục cho thấy RAM tăng đều 3 MB/ảnh, tới
+133 MB. Chạy đúng code đó trên **run loop thật** lại phẳng 34 MB. Nguyên nhân:
+không có autorelease pool + không có run loop nên mọi `NSImage` tạo ra đều bị giữ.
+
+→ Bài đợt trước (`display: false` làm lưới không hiện) cũng dính bẫy này: test bằng
+cách gọi thẳng hàm bỏ qua đường đi chuột thật.
+
+### 3. Những gì thực sự đo được là có ích
+
+| Việc | Đo được |
+|---|---|
+| Bỏ `prewarm` (giải mã hết 43 ảnh lúc mở) | CPU lúc mở 1.25s → 0.18s |
+| Giải mã ngoài luồng chính | không còn đứng hình 0.33s mỗi lần đổi ảnh |
+| Cache RAM LRU (3 ảnh) | bấm ‹ › tức thì, không giải mã lại |
+| `shadowPath` | CoreAnimation không còn rasterize + blur lại bóng mỗi lần kéo |
+| `highlight()` chỉ chạm 2 lớp | thay vì 8, mỗi sự kiện rê chuột lúc khe lưới |
+| Dọn cache theo bucket | 4 bucket rác (9.7 MB) → 1 bucket (0.3 MB) |
+| `Diag.log` dạng autoclosure | không cấp phát chuỗi khi log đang tắt |
+
+### 4. Con số cuối
+
+- **Rảnh (không đổi ảnh): 0.0000% CPU**, footprint phẳng 19 MB. Về mặt năng
+  lượng thì không khác gì một widget nền tĩnh của macOS.
+- **Khi đổi ảnh mỗi 15 giây:** footprint đi ngang 16–25 MB, không tăng theo số ảnh
+  đã xem. RAM **không phình theo thời gian** — đây là điều quan trọng nhất.
+- 4 luồng, 0 dependency, 0 network, 0 Finder.
+
+### 5. Bug tìm ra khi tối ưu
+
+`Bookmarks.resolve()` trả về danh sách riêng của nó và **thay thế hoàn toàn**
+`folders` trong tuỳ chọn; `Bookmarks.save([])` lại không xoá giá trị cũ. Hệ quả:
+bấm "Bỏ thư mục" rồi mở lại app thì app vẫn tự giải mã 24 ảnh cũ. Đã sửa: `folders`
+là nguồn sự thật, bookmark chỉ dùng để *sửa đường dẫn* khi thư mục bị di chuyển.

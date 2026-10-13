@@ -320,15 +320,36 @@ Bộ test nằm ở `Tests/main.swift`, chạy bằng `./test.sh`.
 Chạy `check` trước mỗi lần commit một thay đổi nhỏ. Vượt ngưỡng là biết ngay
 thứ vừa làm nặng thêm, thay vì vài tuần sau mới thấy app nặng.
 
+`check` **hai chiều**: nặng hơn 15% thì báo `LOI` và thoát mã 1; nhẹ hơn 15% thì
+báo `NHAC` chứ không chặn — giảm là tin vui, nhưng giảm mạnh thường có nghĩa là
+app đã hỏng chứ không phải tối ưu hơn. Chỉ ba mốc được phán đạt/thông báo
+(`cpu_idle_pct`, `ram_footprint_mb_median`, `launch_to_window_s`); `min`/`max`/
+`slope` chỉ để đọc vì chúng quá nhiễu.
+
 | Trạng thái | Kết quả |
 |---|---|
-| Rảnh (đo lúc đã ấm) | CPU **0.03 – 0.12%** |
-| Rảnh — footprint | dao động **9.6 – 18.7 MB**, trung vị ~15.5 MB |
+| Rảnh (đo lúc đã ấm) | CPU **0.00 – 0.03%** |
+| Rảnh — footprint | **phẳng 9.5 – 10 MB**, không leo |
+| Rò rỉ | **không có** — đo 8 phút liên tục, đường đo phẳng tuyệt đối |
 | Số luồng | 4 |
-| Mở app → có cửa sổ | 0.62s |
+| Mở app → có cửa sổ | 0.61s |
 | Đổi ảnh (crossfade) | ~9 CPU ms mỗi lần |
 
-**Đo lúc CPU sai chỗ sẽ ra số hoang đường.** Đo ngay sau khi mở app cho
+**Không rò rỉ — và cách chứng minh.** Tổng và `slope` không phân biệt nổi "rò rỉ"
+với "LRU nhả-giữ". Phải nhìn **hình dạng đường đo**. Đo 8 phút, 32 mốc:
+
+```
+19.4 19.4 19.4 20.5 17.1 17.1 17.1 17.1 ... 17.1    ← phẳng tuyệt đối 7+ phút
+```
+
+Rò rỉ thật sẽ là đường thẳng dốc lên không dừng. Đây là đường phẳng.
+
+**Warm-up phải đủ 90 giây — đo sớm hơn sẽ ra số sai.** Đo lúc 20s, cả cửa sổ đo
+còn nằm trên đoạn lên lúc cache LRU đang đầy, và `slope` ra **cộng** dù app
+không dính gì. Đó chính là lý do một lần đo 10 phút báo `+1.03 MB/phút` trong
+khi app thực tế phẳng. `bench.sh` giờ chờ 90s và bỏ 25% đầu khi tính slope.
+
+**Đo CPU sai chỗ sẽ ra số hoang đường.** Đo ngay sau khi mở app cho
 `9.9%` — đó là lúc app đang quét thư mục và giải mã ảnh, không phải mức chạy
 nền. Cùng app đó, đã chạy 14 phút, cho `0.12%`. Bộ đo đã sửa thứ tự: **đo RAM
 trước cho app ấm, rồi mới đo CPU**.

@@ -116,16 +116,29 @@ Hai bẫy nữa, không thuộc về đo số:
 Mỗi thay đổi nhỏ (đổi cách vẽ, thêm một lớp, đổi công thức lưới) nên chạy
 `check` trước khi commit. Nếu vượt, đã biết ngay thứ vừa làm nặng thêm.
 
-Bộ đo này đã dính và tự sửa các lỗi sau — đừng viết lại từ đầu:
+**Kết luận hiện tại: KHÔNG rò rỉ.** Đo 8 phút, 32 mốc:
+
+```
+19.4 19.4 19.4 20.5 17.1 17.1 17.1 17.1 ... 17.1   ← phẳng tuyệt đối 7+ phút
+```
+
+Mỗi lần đo lại bộ đo đã dính và tự sửa các lỗi sau — đừng viết lại từ đầu:
 
 - `ps -o %cpu` sai ý nghĩa → dùng chênh lệch thời gian CPU.
 - Đo CPU **ngay sau khi mở app** ra `9.9%` — đó là lúc quét thư mục và giải mã ảnh,
   không phải mức chạy nền. Cùng app đó, đã chạy 14 phút, cho `0.12%`.
-  **Bộ đo đã sửa thứ tự: đo RAM trước (cho app ấm), đo CPU sau.**
-- `vmmap` in **tung đơn vị**: `18.1M`, `9724K`, `1.2G` — quy đổi để ở Python.
-- `vmmap` có **hai dòng** khớp `Physical footprint` (dòng thứ hai là `(peak)`) —
-  phải loại `(peak)`, nếu không sẽ đọc trúng số đỉnh.
-- `AppleScript` đếm cửa sổ cần quyền Accessibility → dùng `CGWindowList` thay thế.
+  **Đo RAM cho app ấm trước, rồi mới đo CPU.**
+- **Warm-up phải đủ 90s.** Đo lúc 20s, cửa sổ đo còn nằm trên đoạn lên của
+  cache LRU và `slope` ra **cộng giả** — một lần đo 10 phút báo `+1.03 MB/phút`
+  trong khi app phẳng tuyệt đối. Đây là loại số sai nguy hiểm nhất: trông rất
+  "có vấn đề" nhưng thật ra là phép đo sai.
+- `vmmap` in **tùy lúc** `18.1M`, `9724K`, `1.2G` — quy đổi để ở Python.
+- `vmmap` có **hai dòng** khớp `Physical footprint` (dòng thứ hai là `(peak)`).
+- `AppleScript` đếm cửa sổ cần quyền Accessibility → dùng `CGWindowList`.
+
+**Tổng và `slope` không phân biệt được "rò rỉ" với "LRU nhả-giữ".** Muốn kết
+luận thì phải nhìn **chuỗi mốc theo thời gian** (xem `bench/baseline.txt` và lệnh
+mẫu ở `README.md` mục 6), đừng chỉ nhìn một con số tổng.
 
 **GPU không đo được nếu không có `sudo`** cho `powermetrics`. Bộ đo in thẳng
 `khong do duoc` chứ không in số 0 — số 0 sẽ khiến người đọc tưởng app không dùng

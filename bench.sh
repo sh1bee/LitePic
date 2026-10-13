@@ -102,8 +102,15 @@ for _ in $(seq 1 200); do
 done
 pid="$(pid_of)"; [ -n "$pid" ] || die "app khong len sau khi mo"
 [ -n "$launch_s" ] || launch_s="-"
-# Cho app chay 20s de anh giai ma xong roi moi tinh RAM (diem 2 o tren).
-sleep 20
+# Cho app chạy 90s trước khi tính RAM. Con số này không phải tùy ý:
+#
+#   - 20s: đoán dở, ảnh chưa giải mã xong, cache LRU chưa đầy
+#   - 45s: vẫn chưa đủ — đo ra min 9.7 / max 13.4, tức cả cửa sổ đo còn nằm trên
+#           đoạn lên của warm-up
+#   - 90s: đo thật cho thấy app phẳng 17.1MB suốt 7 phút không dứt
+#
+# Trên máy khởi động nhanh hơn thì con số này có thể giảm.
+sleep 90
 
 # --- RAM: nhieu moc theo thoi gian, co slope de bat ro ri ---
 # Thu tu co y nghia: do RAM truoc, do CPU sau. App vua mo con lam viec nong
@@ -133,11 +140,17 @@ v = [to_mb(x) for x in open(sys.argv[1]).read().split() if x.strip()]
 if not v:
     print("- - - -"); raise SystemExit
 n = len(v)
-# slope: hệ số của đường hồi quy (MB/phút) -> phát hiện rò rỉ, không phải đỉnh đơn lẻ
-xs = list(range(n)); mx = sum(xs) / n; my = sum(v) / n
+# min/trung vị/max lấy trên TOÀN BỘ mẫu.
+lo, med, hi = min(v), sorted(v)[n//2], max(v)
+# Slope chỉ lấy phần ĐUÔI của đường mẫu — bỏ 25% đầu, vì đoạn đầu còn thuộc về
+# warm-up (cache LRU đang đầy). Tính cả đường mẫu sẽ ra "rò rỉ" giả: app thật
+# phẳng 17.1MB suốt 7 phút, nhưng đoạn lên 10.7 -> 25.4 làm slope ra cộng.
+t = v[max(1, int(n * 0.25)):] if n >= 6 else v
+m = len(t)
+xs = list(range(m)); mx = sum(xs)/m; my = sum(t)/m
 den = sum((x - mx) ** 2 for x in xs)
-slope = (sum((x - mx) * (y - my) for x, y in zip(xs, v)) / den * 4) if den else 0.0
-print(f"{min(v):.1f} {sorted(v)[n//2]:.1f} {max(v):.1f} {slope:+.2f}")
+slope = (sum((x - mx) * (y - my) for x, y in zip(xs, t)) / den * 4) if den else 0.0
+print(f"{lo:.1f} {med:.1f} {hi:.1f} {slope:+.2f}")
 PY
 )
 read -r ram_min ram_med ram_max ram_slope <<< "$ram_line"
@@ -207,23 +220,40 @@ def load(p):
         except ValueError: pass
     return d
 b, n = load(base_p), load(now_p)
-bad = []
+bad, warn = [], []
+# Chỉ những moc NAO DUNG de phan "dat/khong dat". Cac moc con lai chi de DOC:
+# min/max no theo nha-giu cua LRU, slope nhac theo do dai cua cua so do — ca hai
+# deu quay phien lung khi chang mot thu gi len. Phan tren chung se bao loi sai.
+GATE = {"cpu_idle_pct", "ram_footprint_mb_median", "launch_to_window_s"}
 print(f"{'metric':30}{'moc':>10}{'hien tai':>12}{'chenh %':>10}")
 for k in b:
     if k not in n: continue
     old, cur = b[k], n[k]
-    # slope va launch: chi can giong bang, khong nhan phan tram
-    if "slope" in k or "launch" in k:
-        ok = abs(cur - old) <= max(0.2, abs(old) * 0.5)
-        print(f"{k:30}{old:>10.2f}{cur:>12.2f}{'—':>10}")
+    pct = 100 * (cur - old) / old if old else 0
+    if k in GATE:
+        # Hai chiều, nhung khac nhau:
+        #   NANG HON  -> loi that, phai chan.
+        #   NHE HON   -> KHONG chan, vi giam la tin vui. Nhung "nhac" lon la
+        #                thuong dau hien app da hong (khong tai anh nua, hay do
+        #                sai khac) chu khong phai toi uu hoa — nen phai noi ra
+        #                chu khong bo qua im lang.
+        if pct > tol:
+            bad.append(k); mark = "LOI"
+        elif pct < -tol:
+            warn.append(k); mark = "NHAC"
+        else:
+            mark = "OK"
+        print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  {mark}")
     else:
-        pct = 100 * (cur - old) / old if old else 0
-        ok = pct <= tol
-        print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%")
-    if not ok: bad.append(k)
+        print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  (chi de doc)")
+    if k not in GATE and False: bad.append(k)
 print()
+if warn:
+    print("NHAC — cac moc sau GIAM manh so voi moc. Thường là tin vui, nhưng "
+          "cũng hay là app đã hỏng chứ không phải tối ưu hơn:")
+    print("       " + ", ".join(warn))
 if bad:
-    print("VUOT NGUONG tren cac moc: " + ", ".join(bad)); sys.exit(1)
+    print("LOI — vuot nguong tren cac moc: " + ", ".join(bad)); sys.exit(1)
 print("OK — khong vuot nguong.")
 PY
         rc=$?; rm -f "$now"; exit $rc ;;

@@ -185,46 +185,65 @@ là nguồn sự thật, bookmark chỉ dùng để *sửa đường dẫn* khi 
 
 ## 6. Vấn đề 6 (2026-10-13): widget biến mất khi giữ chuột để bật lưới
 
-**Triệu chứng.** Bấm giữ widget → lưới hiện → widget trống trơn. Cửa sổ vẫn còn,
-vẫn bấm/chuột phải được, `CGWindowList` báo `onScreen=1, alpha=1.00`. Chỉ tới lúc
-app **đổi ảnh** (bộ đếm 15–30s) nó mới hiện lại.
+> Bản tra cứu đầy đủ (kèm phép đo chạy được cho từng lỗi) nằm ở **`BUGS.md`**.
+> Mục này chỉ ghi lại quá trình để hiểu vì sao mất 2 tiếng.
 
-**Đường đi đã sai, ghi lại cho đỡ mất công:**
+**Triệu chứng.** Giữ widget → lưới hiện → widget trống trơn. Cửa sổ vẫn còn, vẫn
+bấm/chuột phải được, `CGWindowList` báo `onScreen=1, alpha=1.00`. Chỉ tới lúc app
+**đổi ảnh** nó mới hiện lại.
 
-* Nghi "overlay ở tầng +1 che widget" → đo thật: overlay trong suốt, không che gì.
-* Nghi `lift()` đặt transform 3D làm hỏng lớp → đo thật: nội dung vẫn hiện.
+**Nguyên nhân.** Ảnh được đổ bằng cách gán `layer.contents` **tay** lên
+`NSImageView`. Ô nhớ đó do AppKit sở hữu: mỗi lần AppKit vẽ lại view, `draw()`
+của `NSImageView` chạy với không có `image` và **xoá sạch `contents`**. Mà đổi
+transform của lớp cha thì đủ để kích hoạt lần vẽ đó — và `lift()` làm đúng việc
+đó ngay khoảnh khắc bấm giữ, **trước cả khi lưới hiện**.
+
+**Cách sửa.** Thay `NSImageView` bằng `ImageCanvas` — `NSView` tự vẽ ảnh trong
+`draw(_:)`. AppKit vẽ lại bao nhiêu lần thì ảnh vẫn còn. Bài học chung:
+
+> **Đừng đặt tay vào `layer.contents` của view AppKit quản lý.** Ô nhớ đó của
+> AppKit, AppKit xoá tuỳ ý. Muốn giữ thì phải tự vẽ trong `draw(_:)`.
+
+### Những chỗ đi sai (vì đều đáng lẽ phải dễ hơn)
+
+* **Nghi overlay che widget** → đo thật: overlay trong suốt, không che gì.
+* **Nghi transform 3D phá lớp** → đo thật: nội dung vẫn hiện.
 * Đo bằng `screencapture -R` vùng widget → dễ đo nhầm cửa sổ của chính mình.
   Bắt buộc `precondition(widget.window.isVisible)` trước khi đo, vì `init()` gọi
-  `orderOut(nil)` và cửa sổ chưa được đưa lên thì phép đo thu về nền.
-* Chụp toàn màn hình rồi crop — vô dụng nếu cửa sổ khác của ta che đúng chỗ.
+  `orderOut(nil)`.
+* Thử 3 kỹ thuật đặt transform rồi kết luận "CABasicAnimation là cách an toàn".
+  **Sai** — cả ba đều làm mất ảnh, nhưng vì thứ tự thử làm sai lệch (sau khi ảnh
+  đã mất thì `setContents` hồi lại được). Chỉ khi đổi kiến trúc mới thấy cả bốn
+  cách đều "giữ được". **Đừng kết luận từ phép thử có tham số bị nhiễm.**
+* Bản sửa đầu tiên của tôi (`container.wantsLayer = true`) **không ăn**. May là
+  tôi kiểm chứng trước khi báo cáo.
 
-**Phép đo bẻ gãy.** Ở tấm ảnh "sau khi thả" widget hiện lại và tôi tưởng lỗi tự
-hết. Hoá ra tấm đó **trùng đúng thời điểm app đổi ảnh** — một sự trùng hợp do
-đặt chu kỳ đổi ảnh là 15s. Đây là dạng bẫy thứ tư khi đo: **trạng thái "đã hồi
-phục" có thể chỉ là tai nạn thời gian**, không phải hành vi của lỗi. Phải nhìn
-cả *trước* khi tạo ra nó.
+**Bẫy thứ tư khi đo — bẫy này đáng nhớ nhất.** Tấm ảnh "sau khi thả" cho thấy
+widget đã hiện lại, và tôi suýt kết luận lỗi tự hết. Hoá ra tấm đó **trùng đúng
+lúc app đổi ảnh** (chu kỳ người dùng đặt là 15s) — tai nạn thời gian, không phải
+hành vi của lỗi. Người dùng phải nhắc mới thấy.
 
-**Nguyên nhân thật.** Ảnh được đổ bằng cách gán `layer.contents` **tay** lên
-`NSImageView`. Ô nhớ đó do AppKit sở hữu: mỗi lần AppKit vẽ lại view, `draw()` của
-`NSImageView` chạy với không có `image` và **xoá sạch `contents`**. Mà đổi
-transform của lớp cha thì đủ để kích hoạt lần vẽ đó — và `lift()` làm đúng việc
-đó ngay khoảnh khắc bấm giữ.
+> **"Đã hồi phục" có thể chỉ là trùng hợp.** Luôn nhìn cả trạng thái *trước* khi
+> tạo ra nó.
 
-**Đo đúng bằng `contents`, không đo pixel.** Pixel chỉ nói "có/không"; `contents`
-nói *tại sao*. Cô lập từng bước cho thấy `onHint` (chính là `lift(1.04)`) là bước
-đầu tiên làm mất ảnh — **trước cả khi lưới hiện**.
+### Lỗi kèm theo phát hiện ra từ đây: ba góc vuông khi giữ
 
-**Bài học về cách thử nghiệm.** Tôi thử ba kỹ thuật đặt transform và kết luận
-"CABasicAnimation là cách an toàn". Sai: cả ba đều làm mất ảnh, nhưng vì thứ tự
-thử làm kết quả sai (sau khi ảnh đã mất thì `setContents` hồi lại được). Chỉ khi
-đổi **kiến trúc** mới thấy cả bốn cách đều "CON" — đó mới là bằng chứng sửa đúng
-chỗ. Đừng kết luận từ phép thử có tham số bị nhiễm.
+Sửa xong lỗi trên thì thấy thêm: lúc widget "nâng" lên, ảnh bị cắt vuông ở ba
+góc, chỉ góc dưới-trái còn bo. **Hai nguyên nhân chồng nhau:**
 
-**Cách sửa.** Bỏ hẳn việc đặt `contents` tay: thay `NSImageView` bằng `ImageCanvas`
-— `NSView` thường tự vẽ ảnh trong `draw(_:)`. AppKit vẽ lại bao nhiêu lần cũng ra
-đúng ảnh. Việc cắt ảnh (vừa khung / phủ kín) chuyển sang tính trong `draw`, và phần
-Retina do AppKit lo thay cho `contentsScale` đặt tay.
+1. Cửa sổ đúng bằng kích thước ảnh → ảnh scale 1.06 tràn ra, bị cửa sổ cắt.
+2. AppKit đặt `anchorPoint = (0,0)` cho view (không phải `0.5,0.5`) → scale quanh
+   góc dưới-trái nên góc đó đứng yên, ba góc kia bị đẩy ra ngoài. **Đúng bất đối
+   xứng người dùng mô tả.**
 
-**Còn sót.** `app.run()` không được bọc trong `asyncAfter` (deadless vòng tròn:
-`asyncAfter` cần run loop mà run loop chờ `app.run()`), và `Thread.sleep` trên main
-thread chặn việc giải mã ảnh nên phép đo báo "ảnh chưa nạp" một cách vô lý.
+Cách sửa: đổi `anchorPoint` sang tâm, chừa viền trong suốt trong cửa sổ, và bo
+góc vẽ tay trong `ImageCanvas.draw(_:)` — cùng nguyên tắc "đừng tin lớp của
+AppKit".
+
+**Bẫy khi tính chỗ trống.** Ban đầu tôi chừa 2.2% rồi 3.5% — vẫn thiếu. Vì **chỗ
+trống cũng bị scale theo**, nên khoảng cách từ tâm tới mép ảnh lớn hơn bạn tưởng,
+và cần `≥ 3.2% × cỡ ảnh`. Thiếu thì góc lại vuông — đo lại thấy ngay.
+
+Hệ quả: cửa sổ lớn hơn ảnh ~8%, nên **lưới phải bám ảnh** (`imageSize`,
+`imageOrigin`) chứ không bám `window.frame` — người dùng nhìn thấy ảnh, không
+phải khung cửa sổ.

@@ -201,10 +201,17 @@ final class GridOverlay {
 /// Tự vẽ trong `draw(_:)` thì AppKit vẽ lại bao nhiêu lần cũng ra đúng ảnh.
 /// Đổi lại là mỗi lần vẽ lại phải tự tính phép vỉa cắt, và AppKit tự lo phần
 /// Retina nên không cần `contentsScale` đặt tay nữa.
+///
+/// Bo góc cũng vẽ tại đây, **không** dùng `layer.cornerRadius` + `masksToBounds`:
+/// khi lớp cha có transform (đúng lúc widget "nâng" lên khi giữ chuột) thì cái
+/// khoén bo của lớp con hay bị mất — chỉ một góc thoát được, ba góc thành vuông.
+/// Cắt trong `draw` thì bo góc là một phần của nét vẽ nên luôn bền.
 final class ImageCanvas: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
     /// Phủ kín và cắt bớt phần thừu, thay vì vừa khung giữ nguyên tỉ lệ.
     var fill = false { didSet { needsDisplay = true } }
+    /// Bán kính bo góc, vẽ tay trong `draw(_:)`.
+    var cornerRadius: CGFloat = 0 { didSet { needsDisplay = true } }
 
     override var isFlipped: Bool { true }
 
@@ -213,6 +220,10 @@ final class ImageCanvas: NSView {
         let sz = img.size
         guard sz.width > 0, sz.height > 0 else { return }
         let r = bounds
+        if cornerRadius > 0 {
+            NSBezierPath(roundedRect: r, xRadius: cornerRadius,
+                         yRadius: cornerRadius).addClip()
+        }
         // `isFlipped` nên `midY` của `bounds` vẫn là tâm — tính tâm là đủ, khỏi
         // phải nhớ chiều trục.
         let k = fill ? max(r.width / sz.width, r.height / sz.height)
@@ -361,12 +372,11 @@ final class WidgetWindow {
         container.layer?.shadowRadius = 14
         container.layer?.shadowOffset = CGSize(width: 0, height: -6)
 
-        imageView.layer?.cornerRadius = r
-        imageView.layer?.cornerCurve = .continuous
-        imageView.layer?.masksToBounds = true
-        topView.layer?.cornerRadius = r
-        topView.layer?.cornerCurve = .continuous
-        topView.layer?.masksToBounds = true
+        // Bo góc do `ImageCanvas` tự cắt trong `draw(_:)` — đặt `cornerRadius` /
+        // `masksToBounds` trên lớp thì không bền: lúc lớp cha có transform (widget
+        // "nâng" lên khi giữ chuột) thì ba góc mất bo, chỉ góc dưới-trái còn.
+        imageView.cornerRadius = r
+        topView.cornerRadius = r
     }
 
     /// Đổ ảnh vào lớp theo chế độ điền đã chọn.
@@ -497,12 +507,42 @@ final class WidgetWindow {
         return true
     }
 
-    private func layout() {
+    /// Khoảng trống chừa sẵn trong cửa sổ cho lúc widget "nâng" lên khi giữ chuột.
+///
+/// `lift()` scale cửa sổ lên tới 1.06. Trước đây ảnh áp **đúng mép cửa sổ**, nên
+/// khi scale, phần tràn ra bị cửa sổ cắt và ba góc trông thành vuông. Chỉ góc
+/// dưới-trái còn bo — vì AppKit đặt `anchorPoint = (0,0)` cho view, nên phép scale
+/// quanh chính góc đó, nó đứng yên; ba góc kia thì dịch ra ngoài và bị cắt.
+///
+/// Chừa sẵn khoảng trống này thì cả bốn góc vẫn nằm trong cửa sổ khi nâng lên.
+/// Khoảng trống trong suốt nên nhìn không thấy gì thay đổi lúc đứng yên.
+///
+/// Vì `anchorPoint` được đổi thành tâm (xem `layout()`), mỗi mép chỉ dịch ra
+/// `3% × nửa cỡ ảnh`, nên chỉ cần chừa một nửa.
+private func liftRoom(_ imageSize: NSSize) -> NSSize {
+    // Mép ảnh dịch ra `3% × khoảng cách từ tâm`, mà khoảng cách đó tính cả phần
+    // đang chừa. Giải ra: cần `room ≥ 3.2% × cỡ ảnh` — chừa 4% cho chắc ăn.
+    let k: CGFloat = 0.04
+    return NSSize(width: max(4, imageSize.width * k),
+                  height: max(4, imageSize.height * k))
+}
+
+private func layout() {
         let i = frameInset, b = frameBottom, p = framePad
-        window.setContentSize(NSSize(width: imageSize.width + (i + p) * 2,
-                                     height: imageSize.height + (i + p) * 2 + b))
+        let room = liftRoom(imageSize)
+        window.setContentSize(NSSize(width: imageSize.width + (i + p) * 2 + room.width * 2,
+                                     height: imageSize.height + (i + p) * 2 + b + room.height * 2))
         container.frame = container.bounds
-        let r = NSRect(x: i + p, y: i + p,
+        // AppKit đặt `anchorPoint = (0,0)` cho view, tức phép scale quanh góc
+        // dưới-trái — widget "nâng" lên lệch hẳn sang một bên, và mép nào bị
+        // đẩy ra ngoài cửa sổ thì thành góc vuông. Chuyển sang tâm: nâng lên từ
+        // chính giữa (đúng nghĩa), và mỗi mép chỉ dịch ra nửa chừng nên chỗ
+        // trống phải chừa cũng giảm được một nửa.
+        if let cl = container.layer {
+            cl.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            cl.position = CGPoint(x: container.bounds.midX, y: container.bounds.midY)
+        }
+        let r = NSRect(x: i + p + room.width, y: i + p + room.height,
                        width: imageSize.width, height: imageSize.height)
         imageView.frame = r
         topView.frame = r
@@ -678,11 +718,28 @@ final class WidgetWindow {
 
     /// Tính lại lưới khi đổi màn hình giữa lúc kéo. Cùng một mảng `activeSlots`
     /// được dùng cho cả highlight lẫn thả — không bao giờ lệch nhau.
-    private func ensureSlots() {
+    /// Viền trong suốt quanh ảnh — lệch toạ độ từ góc cửa sổ tới góc ảnh.
+///
+/// Cửa sổ lớn hơn ảnh (xem `liftRoom`) nên góc cửa sổ KHÔNG phải góc ảnh. Mọi
+/// thứ liên quan tới lưới phải dùng cỡ và vị trí của **ảnh**, vì đó mới là thứ
+/// người dùng nhìn thấy và nhắm tới.
+private var imageInset: NSPoint {
+    let room = liftRoom(imageSize)
+    return NSPoint(x: frameInset + framePad + room.width,
+                   y: frameInset + framePad + room.height)
+}
+
+/// Góc trên-trái của ảnh theo toạ độ màn hình.
+private var imageOrigin: NSPoint {
+    NSPoint(x: window.frame.minX + imageInset.x,
+            y: window.frame.minY + imageInset.y)
+}
+
+private func ensureSlots() {
         guard let s = currentScreen() else { return }
         if activeScreen !== s || activeSlots.isEmpty {
             activeScreen = s
-            activeSlots = snapSlots(size: window.frame.size, on: s)
+            activeSlots = snapSlots(size: imageSize, on: s)
         }
     }
 
@@ -719,9 +776,9 @@ final class WidgetWindow {
         // Ô lưới bo góc theo CHÍNH widget, để hình khớp lúc thả.
         // Trước đây đọc `settings.cornerRadius` — một tuỳ chọn riêng, tách rời
         // khỏi kiểu khung, nên đổi khung xong ô lưới vẫn bo theo giá trị cũ.
-        overlay.show(slots: activeSlots, size: window.frame.size,
+        overlay.show(slots: activeSlots, size: imageSize,
                      corner: settings.frameStyle.imageCorner, on: s)
-        overlay.highlight(index: nearestIndex(in: activeSlots, to: window.frame.origin))
+        overlay.highlight(index: nearestIndex(in: activeSlots, to: imageOrigin))
     }
 
     private func dragFree(to origin: NSPoint) {
@@ -734,10 +791,10 @@ final class WidgetWindow {
         let before = activeScreen
         ensureSlots()
         if activeScreen !== before, let s = activeScreen {
-            overlay.show(slots: activeSlots, size: window.frame.size,
+            overlay.show(slots: activeSlots, size: imageSize,
                          corner: settings.frameStyle.imageCorner, on: s)
         }
-        overlay.highlight(index: nearestIndex(in: activeSlots, to: window.frame.origin))
+        overlay.highlight(index: nearestIndex(in: activeSlots, to: imageOrigin))
     }
 
     private func finishDrop(_ result: DropResult) {
@@ -748,8 +805,12 @@ final class WidgetWindow {
         switch result {
         case .snap:
             ensureSlots()
-            if let i = nearestIndex(in: activeSlots, to: window.frame.origin) {
-                window.setFrameOrigin(activeSlots[i])
+            if let i = nearestIndex(in: activeSlots, to: imageOrigin) {
+                // Lưới bám ảnh, nên khi khe phải dịch cửa sổ lùi lại đúng phần
+                // viền trong suốt — nếu không, cửa sổ sẽ lệch so với ô.
+                let inset = imageInset
+                window.setFrameOrigin(NSPoint(x: activeSlots[i].x - inset.x,
+                                              y: activeSlots[i].y - inset.y))
             }
             settings.savedOrigin = window.frame.origin
         case .free:

@@ -1,0 +1,8 @@
+# Moc hieu nang — tao bang ./bench.sh save
+# So sanh bang ./bench.sh check (nguong 15%)
+cpu_idle_pct=0.033
+ram_footprint_mb_min=9.6
+ram_footprint_mb_median=15.5
+ram_footprint_mb_max=18.7
+ram_slope_mb_per_min=+1.75
+launch_to_window_s=0.62

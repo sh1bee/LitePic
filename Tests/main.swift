@@ -120,7 +120,14 @@ func after(_ d: TimeInterval, _ f: @escaping () -> Void) {
 /// tai (526.75, 437.5) tro thanh (527, 437). Do lech toi da khi khe dung la
 /// sqrt(0.75^2 + 0.5^2) ~ 0.91pt, nen dung nguong 1.5pt.
 func snapReport(_ w: WidgetWindow, _ slots: [NSPoint]) -> (Bool, String) {
-    let pos = w.window.frame.origin
+    // Cửa sổ có viền trong suốt (chừa chỗ cho lúc widget nâng lên), nên phải
+    // so vị trí của ẢNH — cùng cách `WidgetWindow` bám lưới theo ảnh.
+    let M = { (o: Any, _ l: String) -> Any? in
+        Mirror(reflecting: o).children.first { $0.label == l }?.value }
+    let container = M(w, "container") as! NSView
+    let inset = container.subviews.first { $0 is ImageCanvas }?.frame.origin ?? .zero
+    let pos = NSPoint(x: w.window.frame.minX + inset.x,
+                      y: w.window.frame.minY + inset.y)
     guard let n = slots.min(by: {
         hypot($0.x - pos.x, $0.y - pos.y) < hypot($1.x - pos.x, $1.y - pos.y)
     }) else { return (false, "khong co o nao de so") }

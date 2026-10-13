@@ -66,12 +66,15 @@ final class Settings {
 
     // MARK: - Nguồn ảnh
 
-    /// Thư mục ảnh. Đọc từ bookmark trước, rồi mới tới đường dẫn thường — bookmark
-    /// giữ được thư mục trong Drive/iCloud kể cả khi đường dẫn đã đổi.
+    /// Thư mục ảnh.
+    ///
+    /// `folderPaths` là nguồn sự thật về thứ tự và thành phần. Bookmark chỉ dùng
+    /// để sửa đường dẫn khi thư mục đã bị di chuyển — không bao giờ thay thế danh
+    /// sách, vì nếu thay thế thì "Bỏ thư mục" sẽ không bao giờ có tác dụng.
     var folders: [URL] {
-        let marked = Bookmarks.resolve()
-        if !marked.isEmpty { return marked }
-        return folderPaths.map { URL(fileURLWithPath: $0) }
+        let paths = folderPaths
+        let located = Bookmarks.resolve(paths)
+        return paths.map { located[$0] ?? URL(fileURLWithPath: $0) }
     }
 
     var folderPaths: [String] {
@@ -81,6 +84,9 @@ final class Settings {
             Bookmarks.save(newValue.map { URL(fileURLWithPath: $0) })
         }
     }
+
+    /// Thư mục đã chọn nhưng hiện không đọc được (ổ chưa mount, thư mục đã xoá).
+    var missingFolders: [String] { Bookmarks.missing(folderPaths) }
 
     // MARK: - Tần suất đổi ảnh
 

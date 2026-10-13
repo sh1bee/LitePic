@@ -98,6 +98,15 @@ final class AppController: NSObject, NSApplicationDelegate {
         if !settings.folderPaths.isEmpty {
             add(m, "Bỏ thư mục (\(images.count) ảnh)", #selector(clearFolders))
         }
+        // Báo thẳng thư mục nào hỏng, thay vì im lặng cho người dùng tưởng hỏng app.
+        let gone = settings.missingFolders
+        if !gone.isEmpty {
+            let note = NSMenuItem(
+                title: "\(gone.count) thư mục không mở được (ổ chưa mount?)",
+                action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            m.addItem(note)
+        }
         m.addItem(.separator())
 
         m.addItem(submenu("Đổi ảnh", intervalMenu()))

@@ -55,7 +55,6 @@ final class Settings {
         static let interactive   = "interactive"
         static let snapToGrid   = "snapToGrid"
         static let renderScale  = "renderScale"
-        static let cornerRadius = "cornerRadius"
         static let levelMode    = "levelMode"
         static let changeOnWake = "changeOnWake"
         static let pinned     = "pinnedURL"
@@ -154,11 +153,6 @@ final class Settings {
     var renderScale: CGFloat {
         get { d.object(forKey: K.renderScale) == nil ? 2 : CGFloat(d.double(forKey: K.renderScale)) }
         set { d.set(Double(newValue), forKey: K.renderScale) }
-    }
-
-    var cornerRadius: CGFloat {
-        get { d.object(forKey: K.cornerRadius) == nil ? 20 : CGFloat(d.double(forKey: K.cornerRadius)) }
-        set { d.set(Double(newValue), forKey: K.cornerRadius) }
     }
 
     var levelMode: LevelMode {

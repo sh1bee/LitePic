@@ -32,9 +32,6 @@ final class DraggableView: NSView {
     /// Báo rê chuột vào/ra widget để hiện/ẩn nút điều khiển.
     var onHover: ((Bool) -> Void)?
 
-    /// Tạm cho kiểm thử quan sát callback (gỡ khi xong).
-    struct debugHooks { static var onLongPress: (() -> Void)? }
-
     /// Giữ bao lâu thì vào chế độ lưới.
     ///
     /// Đã giảm từ 2.0s xuống 1.2s: ở 2 giây người dùng dễ tưởng app treo và
@@ -117,22 +114,9 @@ final class DraggableView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        // Đường đi THẬT của chuột. Test cũ gọi thẳng hàm này nên bỏ qua hết
-        // phần này — log lại để biết sự kiện có thật sự tới nơi hay không.
-        Diag.log("mouseDown TOI: evtWin=\(event.windowNumber) viewWin=\(window?.windowNumber ?? -1) loc=\(event.locationInWindow)")
-
-        guard let w = window else {
-            Diag.log("  -> THOAT: view khong con window")
-            return
-        }
-        Diag.describe(w, "  mouseDown")
-
-        guard let p0 = screenPoint(event) else {
-            Diag.log("  -> THOAT: khong lay duoc toa do")
-            return
-        }
+        guard let w = window else { return }
+        guard let p0 = screenPoint(event) else { return }
         w.makeKey()
-        Diag.log("  makeKey xong, isKey=\(w.isKeyWindow)")
         grabOffset = NSPoint(x: p0.x - w.frame.origin.x, y: p0.y - w.frame.origin.y)
 
         isPressed = true
@@ -179,7 +163,6 @@ final class DraggableView: NSView {
                         onHoldTick?()
                     } else {
                         armed = true
-                        debugHooks.onLongPress?()
                         onLongPress?()
                     }
                 }
@@ -187,7 +170,6 @@ final class DraggableView: NSView {
             }
 
             if e.type == .leftMouseUp {
-                Diag.log("mouseUp nhan: moved=\(moved) armed=\(armed) hinted=\(hinted)")
                 if moved {
                     onDrop?(armed ? .snap : .free)
                 } else if armed {
@@ -332,7 +314,6 @@ final class WidgetWindow {
     private var frameInset: CGFloat { settings.frameStyle.inset }
     private var frameBottom: CGFloat { settings.frameStyle.extraBottom }
     private var framePad: CGFloat { settings.frameStyle.pad }
-    private var snapMode = false
     private var activeSlots: [NSPoint] = []
     private weak var activeScreen: NSScreen?
 
@@ -688,15 +669,17 @@ final class WidgetWindow {
 
     private func cancelHoldHint() { lift(1.0) }
 
-    /// Giữ đủ 2s: bật chế độ lưới và hiện toàn bộ ô hợp lệ.
+    /// Giữ đủ 1.2s: bật chế độ lưới và hiện toàn bộ ô hợp lệ.
     private func armSnapMode() {
-        snapMode = true
         lift(1.06)
         activeScreen = nil
         ensureSlots()
         guard let s = activeScreen, !activeSlots.isEmpty else { return }
+        // Ô lưới bo góc theo CHÍNH widget, để hình khớp lúc thả.
+        // Trước đây đọc `settings.cornerRadius` — một tuỳ chọn riêng, tách rời
+        // khỏi kiểu khung, nên đổi khung xong ô lưới vẫn bo theo giá trị cũ.
         overlay.show(slots: activeSlots, size: window.frame.size,
-                     corner: settings.cornerRadius, on: s)
+                     corner: settings.frameStyle.imageCorner, on: s)
         overlay.highlight(index: nearestIndex(in: activeSlots, to: window.frame.origin))
     }
 
@@ -711,7 +694,7 @@ final class WidgetWindow {
         ensureSlots()
         if activeScreen !== before, let s = activeScreen {
             overlay.show(slots: activeSlots, size: window.frame.size,
-                         corner: settings.cornerRadius, on: s)
+                         corner: settings.frameStyle.imageCorner, on: s)
         }
         overlay.highlight(index: nearestIndex(in: activeSlots, to: window.frame.origin))
     }
@@ -719,7 +702,6 @@ final class WidgetWindow {
     private func finishDrop(_ result: DropResult) {
         overlay.hide()
         lift(1.0)
-        snapMode = false
         activeScreen = nil
 
         switch result {
@@ -757,5 +739,26 @@ final class WidgetWindow {
             x: min(max(origin.x, s.minX + m), max(s.minX + m, s.maxX - f.width - m)),
             y: min(max(origin.y, s.minY + m), max(s.minY + m, s.maxY - f.height - m))
         )
+    }
+
+    /// Kéo widget về màn hình khi nó rơi ra ngoài mọi màn hình đang cắm.
+    ///
+    /// Xảy ra khi: kéo widget sang màn hình phụ rồi rút cáp. Toạ độ đã lưu trỏ
+    /// tới vị trí không còn tồn tại, widget biến mất và người dùng tưởng app
+    /// treo. Chỉ kiểm tra cắt qua `NSScreen.frame` — dùng `visibleFrame` thì
+    /// widget nằm sát mép dưới sẽ bị coi là "ngoài" dù vẫn thấy được.
+    @discardableResult
+    func recoverIfOffscreen() -> Bool {
+        let f = window.frame
+        let onSomeScreen = NSScreen.screens.contains { NSIntersectsRect($0.frame, f) }
+        guard !onSomeScreen else { return false }
+
+        guard let s = NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame
+        else { return false }
+        window.setFrameOrigin(NSPoint(
+            x: min(max(f.minX, s.minX + 4), max(s.minX + 4, s.maxX - f.width - 4)),
+            y: min(max(f.minY, s.minY + 4), max(s.minY + 4, s.maxY - f.height - 4))))
+        settings.savedOrigin = window.frame.origin
+        return true
     }
 }

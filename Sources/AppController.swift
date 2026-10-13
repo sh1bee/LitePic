@@ -59,6 +59,14 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func watchScreenState() {
+        // Cắm/rút màn hình, đổi độ phân giải: widget có thể rơi ra ngoài mọi
+        // màn hình và biến mất. Kéo về vùng nhìn thấy được.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                if self?.widget.recoverIfOffscreen() == true { self?.rebuildMenu() }
+            }
+
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) {
             [weak self] _ in
@@ -149,6 +157,16 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         m.addItem(.separator())
         add(m, "Xoá cache ảnh", #selector(clearImageCache))
+        m.addItem(.separator())
+        add(m, "Tự chạy khi đăng nhập", #selector(toggleLaunchAtLogin),
+            state: LaunchAtLogin.isEnabled ? .on : .off)
+        if LaunchAtLogin.isEnabled {
+            // Nói rõ thay vì để người dùng tưởng đã có hiệu lực.
+            let note = NSMenuItem(title: "Có hiệu lực từ lần đăng nhập kế tiếp",
+                                  action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            m.addItem(note)
+        }
         add(m, "Thoát LitePic", #selector(quitApp))
 
         return m
@@ -455,6 +473,18 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func clearImageCache() {
         ImageStore.clearCache()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let want = !LaunchAtLogin.isEnabled
+        if let err = LaunchAtLogin.set(want) {
+            let a = NSAlert()
+            a.messageText = "Không đổi được tự chạy"
+            a.informativeText = err
+            a.alertStyle = .warning
+            a.runModal()
+        }
+        rebuildMenu()
     }
 
     @objc private func quitApp() {

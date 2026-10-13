@@ -71,9 +71,6 @@ final class WidgetControls: NSView {
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
     }
 
-    func show() { isHidden = false }
-    func hide() { isHidden = true }
-
     @objc private func pressPrev() { onPrev?() }
     @objc private func pressNext() { onNext?() }
     @objc private func pressPin() { onTogglePin?() }

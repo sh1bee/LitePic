@@ -29,7 +29,7 @@ final class DraggableView: NSView {
     var isPressed: Bool { session.isPressed }
     var isDragging: Bool { session.isDragging }
 
-    /// Mấu chốt để kéo hoạt động: `NSImageView` phủ kín toàn bộ cửa sổ, nên mặc
+    /// Mấu chốt để kéo hoạt động: `ImageCanvas` phủ kín toàn bộ cửa sổ, nên mặc
     /// định hit-test trả về chính imageView và các sự kiện chuột không bao giờ
     /// tới `DraggableView`. Mọi điểm trong biên đều trả về `self`.
     override func hitTest(_ point: NSPoint) -> NSView? {

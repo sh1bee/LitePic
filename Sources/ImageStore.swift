@@ -132,21 +132,8 @@ enum ImageStore {
     ///
     /// Trả ngay tức thì (không cần bố trí hẹn giờ) nếu ảnh còn trong RAM — đường
     /// này chiếm đa số lượt bấm nút Next/Previous.
-    /// Dung lượng bộ nhớ thật của tiến trình (MB) — dùng để soi trong log.
-    static func footprintMB() -> Int {
-        var i = task_vm_info_data_t()
-        var c = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / 4)
-        let r = withUnsafeMutablePointer(to: &i) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(c)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &c) } }
-        return r == KERN_SUCCESS ? Int(i.phys_footprint) / 1048576 : 0
-    }
-
     static func load(_ url: URL, maxPixel: CGFloat, completion: @escaping (NSImage?) -> Void) {
-        let before = footprintMB()
-        Diag.log("LOAD \(url.lastPathComponent.prefix(20))  maxPx=\(Int(maxPixel)) truoc=\(before)MB")
         if let hit = inMemory(url, maxPixel: maxPixel) {
-            Diag.log("  -> RAM  sau=\(footprintMB())MB")
             completion(hit)
             return
         }
@@ -171,14 +158,13 @@ enum ImageStore {
             // `CACHE_RESOLVED_IMAGES` bật thì ImageIO cache lại ảnh đã giải mã
             // theo đường dẫn — tức là giữ nguyên ảnh 4K trong RAM. Tắt hẳn:
             // ta đã có cache riêng ở tầng trên, không cần ImageIO nhớ gì thêm.
-            guard let cg = self.decodeScaled(url, maxPixel: CGFloat(pixel)) else {
+            guard let cg = self.decodeThumbnail(of: url, maxPixel: CGFloat(pixel)) else {
                 DispatchQueue.main.async { completion(nil) }
                 return
             }
             let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
             self.remember(key, img)
             self.writeCache(cg, to: file)
-            Diag.log("  -> GIAI MA \(cg.width)x\(cg.height)  sau=\(footprintMB())MB")
             DispatchQueue.main.async { completion(img) }
         }
     }
@@ -219,60 +205,6 @@ enum ImageStore {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
     }
-
-    /// Giải mã JPEG theo bội số của 2, rồi thu nhỏ bằng CoreGraphics nếu cần.
-    ///
-    /// ImageIO chỉ giải mã kiểu JPEG-DCT (nhanh, không cần bộ nhớ ảnh đầy đủ)
-    /// khi kích thước yêu cầu chia hết cho kích thước gốc. Với ảnh 3840×2160 và
-    /// yêu cầu 1280, tỉ lệ là 1/3 — không chia hết, nên ImageIO buộc phải giải
-    /// mã toàn bộ rồi mới thu nhỏ.
-    ///
-    /// Sửa bằng cách xin mức chia hết (1280 → 960) rồi thu nhỏ tiếp trong
-    /// CoreGraphics, vốn chỉ cần bộ nhớ bằng kích thước đích. Đo trên máy này:
-    /// peak 12.5 MB thay vì 105.8 MB khi giải mã đầy đủ 3840px.
-    private static func decodeScaled(_ url: URL, maxPixel: CGFloat) -> CGImage? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
-        let w = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue ?? 0
-        let h = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue ?? 0
-        guard w > 0, h > 0 else { return decodeThumbnail(of: url, maxPixel: maxPixel) }
-
-        // Bậc nhân tự nhiên mà ImageIO dùng được: 1/2, 1/4, 1/8…
-        let base = max(w, h)
-        var step = base
-        while step > maxPixel, step.truncatingRemainder(dividingBy: 2) == 0 { step /= 2 }
-        // Không chia hết được (ví dụ 3840 với 1280) → dừng ở mức chia hết gần nhất.
-        while step > maxPixel * 1.5, step > 1 { step = (step / 2).rounded(.down) * 2 }
-
-        guard step < base else { return decodeThumbnail(of: url, maxPixel: maxPixel) }
-        guard let mid = decodeThumbnail(of: url, maxPixel: CGFloat(step)) else { return nil }
-
-        let nw = max(1, Int((CGFloat(mid.width) * (maxPixel / CGFloat(max(mid.width, mid.height)))).rounded()))
-        let nh = max(1, Int((CGFloat(mid.height) * (maxPixel / CGFloat(max(mid.width, mid.height)))).rounded()))
-
-        // Dùng lại MỘT vùng đệm cho mọi lần resize.
-        //
-        // `CGContext(data: nil)` cấp phát buffer mới mỗi lần gọi và giữ lại —
-        // đo được: resize 24 ảnh bằng context tạo mới làm RAM bộ nhớ tăng từ 3 MB
-        // lên 5 MB và không xuống. Vùng đệm tái dùng có sẵn nên không phát sinh
-        // cấp phát nào sau lần đầu.
-        let bytesPerRow = nw * 4
-        let need = bytesPerRow * nh
-        if resizeBuffer.count < need { resizeBuffer = Data(count: need) }
-        guard let ctx = CGContext(data: resizeBuffer.withUnsafeMutableBytes { $0.baseAddress },
-                                  width: nw, height: nh, bitsPerComponent: 8,
-                                  bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue)
-        else { return mid }
-        ctx.interpolationQuality = .high
-        ctx.draw(mid, in: CGRect(x: 0, y: 0, width: nw, height: nh))
-        // `makeImage()` sao chép dữ liệu ra vùng riêng nên an toàn khi ta ghi đè
-        // buffer cho lần sau.
-        return ctx.makeImage() ?? mid
-    }
-
-    /// Vùng đệm dùng lại cho bước resize. Chỉ đụng từ `decodeQueue` (nối tiếp).
-    nonisolated(unsafe) private static var resizeBuffer = Data()
 
     /// Ghi cache bằng chính ImageIO.
     ///

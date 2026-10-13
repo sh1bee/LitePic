@@ -13,6 +13,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var isPinned: Bool { settings.pinnedURL != nil }
     private var paused = false
     private var screenAsleep = false
+    /// Đang có một lần thử đổi ảnh hoãn vì người dùng đang kéo widget.
+    private var retryScheduled = false
 
     private static let intervalChoices: [(String, Int)] = [
         ("15 giây", 15), ("30 giây", 30), ("1 phút", 60),
@@ -287,15 +289,21 @@ final class AppController: NSObject, NSApplicationDelegate {
         guard !images.isEmpty else { return }
         // Đang giữ/kéo widget mà đổi ảnh thì cửa sổ đổi kích thước và giật
         // khỏi tay người dùng — thử lại sau 5 giây thay vì đổi ngay.
+        //
+        // Chỉ hẹn MỘT lần thử lại. Bản cũ hẹn mới mỗi lần gặp: nếu người dùng
+        // giữ chuột kéo widget, cứ 5 giây lại dồn thêm một hẹn giờ, và khi thả
+        // ra cả đống cùng chạy — mỗi cái lại tự hẹn thêm một cái nữa.
         if widget.busy {
+            guard !retryScheduled else { return }
+            retryScheduled = true
             Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+                self?.retryScheduled = false
                 self?.advance()
             }
             return
         }
         // Ảnh đã ghim: đứng yên.
         if isPinned { showPinnedIfNeeded(); return }
-
         var idx: Int
         if images.count == 1 {
             idx = 0

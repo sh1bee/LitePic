@@ -189,14 +189,50 @@ final class GridOverlay {
     }
 }
 
+/// Toan cảnh vẽ ảnh — tự vẽ trong `draw(_:)` thay vì đặt `layer.contents` tay.
+///
+/// VÌ SAO KHÔNG DÙNG `NSImageView`: `layer.contents` là ô nhớ do AppKit quản
+/// lý. Mỗi lần AppKit vẽ lại view (rất dễ xảy ra khi lớp cha đổi transform —
+/// tức lúc widget "nâng" lên khi bạn giữ chuột), `draw()` của `NSImageView`
+/// chạy với không có `image` và **xoá sạch `contents`**. Widget mất trắng: cửa
+/// sổ vẫn còn, vẫn bấm và chuột phải được, nhưng không còn gì để vẽ — và chỉ
+/// tới lần đổi ảnh kế tiếp mới hiện lại.
+///
+/// Tự vẽ trong `draw(_:)` thì AppKit vẽ lại bao nhiêu lần cũng ra đúng ảnh.
+/// Đổi lại là mỗi lần vẽ lại phải tự tính phép vỉa cắt, và AppKit tự lo phần
+/// Retina nên không cần `contentsScale` đặt tay nữa.
+final class ImageCanvas: NSView {
+    var image: NSImage? { didSet { needsDisplay = true } }
+    /// Phủ kín và cắt bớt phần thừu, thay vì vừa khung giữ nguyên tỉ lệ.
+    var fill = false { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let img = image else { return }
+        let sz = img.size
+        guard sz.width > 0, sz.height > 0 else { return }
+        let r = bounds
+        // `isFlipped` nên `midY` của `bounds` vẫn là tâm — tính tâm là đủ, khỏi
+        // phải nhớ chiều trục.
+        let k = fill ? max(r.width / sz.width, r.height / sz.height)
+                     : min(r.width / sz.width, r.height / sz.height)
+        let target = NSRect(x: r.midX - sz.width * k / 2,
+                            y: r.midY - sz.height * k / 2,
+                            width: sz.width * k, height: sz.height * k)
+        img.draw(in: target, from: .zero, operation: .copy, fraction: 1,
+                 respectFlipped: true, hints: nil)
+    }
+}
+
 /// Cửa sổ widget: bo tròn, có bóng, kéo tự do hoặc giữ 2s để khe lưới.
 final class WidgetWindow {
     private let settings = Settings.shared
     let window: NSWindow
     private let container: DraggableView
-    private let imageView: NSImageView
+    private let imageView: ImageCanvas
     /// Lớp ảnh thứ hai, chồm lên lớp đầu — dùng để chuyển ảnh mềm.
-    private let topView: NSImageView
+    private let topView: ImageCanvas
     private let overlay = GridOverlay(level: NSWindow.Level(
         rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 21))
 
@@ -246,18 +282,15 @@ final class WidgetWindow {
         window = w
 
         // Vị trí thật do `layout()` đặt; ở đây chỉ cần một khung tạm cho tới lúc đó.
-        let iv = NSImageView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let iv = ImageCanvas(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         iv.autoresizingMask = []
-        // Không dùng `imageScaling` của NSImageView: nó chỉ có "vừa khung", không
-        // cắt được. Để vẽ bằng layer thì kiểm soát được cả hai, và nhất là đặt
-        // `contentsScale` đúng màn hình Retina.
         iv.wantsLayer = true
         iv.layer?.opacity = 0      // lớp dưới: luôn trong suốt
         imageView = iv
 
         // Lớp trên: chỉ hiện khi đang chuyển ảnh. Hai lớp chồng nhau là cách
-        // crossfade rẻ nhất — chỉ animate `opacity`, không đụng contents.
-        let ivTop = NSImageView(frame: iv.frame)
+        // crossfade rẻ nhất — chỉ animate `opacity`, không đụng ảnh.
+        let ivTop = ImageCanvas(frame: iv.frame)
         ivTop.autoresizingMask = []
         ivTop.wantsLayer = true
         ivTop.layer?.opacity = 1
@@ -336,28 +369,21 @@ final class WidgetWindow {
         topView.layer?.masksToBounds = true
     }
 
-    /// Đổ ảnh vào layer theo chế độ điền đã chọn.
+    /// Đổ ảnh vào lớp theo chế độ điền đã chọn.
     ///
-    /// `contentsGravity` là lúc này quyết định mọi thứ:
-    ///   - `.resizeAspect`      vừa khung, giữ nguyên tỉ lệ
-    ///   - `.resizeAspectFill`  phủ kín, cắt bớt phần thừa
-    ///
-    /// Phải đặt `contentsScale` bằng hệ số thật của màn hình, nếu không ảnh
-    /// sẽ mờ trên Retina — đây là lý do không dùng `NSImageView.imageScaling`.
+    /// `ImageCanvas` tự tính phép vỉa cắt trong `draw(_:)` nên ở đây chỉ cần
+    /// tra ảnh vào và bảo nó vẽ lại. Phần Retina do AppKit lo trong `draw`.
     private func refreshImageLayer() {
         setContents(currentImage, on: imageView)
         imageView.layer?.opacity = 1
         topView.layer?.opacity = 0
     }
 
-    private func setContents(_ img: NSImage?, on v: NSImageView) {
-        guard let img, let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        else { return }
-        let l = v.layer
-        l?.contents = cg
-        l?.contentsGravity = settings.fillMode == .fill ? .resizeAspectFill : .resizeAspect
-        l?.contentsScale = currentScreen()?.backingScaleFactor
-            ?? NSScreen.main?.backingScaleFactor ?? 2
+    private func setContents(_ img: NSImage?, on v: ImageCanvas) {
+        guard let img else { return }
+        v.image = img
+        v.fill = (settings.fillMode == .fill)
+        v.needsDisplay = true
     }
 
     /// Chuyển ảnh mềm: ảnh mới nằm ở lớp đang mờ, lớp cũ mờ dần.
@@ -384,7 +410,7 @@ final class WidgetWindow {
     /// `NSAnimationContext`, nên thời lượng và easing không kiểm soát được.
     /// Rõ hơn nữa, phải trộn `view.alphaValue` và `layer.opacity` là hỏng —
     /// hai thứ nhân với nhau.
-    private func fade(_ view: NSImageView, to value: Float) {
+    private func fade(_ view: ImageCanvas, to value: Float) {
         guard let l = view.layer else { return }
         l.removeAnimation(forKey: "fade")
         // Lấy giá trị đang hiển thị trên màn hình, không phải giá trị model —
@@ -407,10 +433,30 @@ final class WidgetWindow {
     }
 
     private func lift(_ scale: CGFloat) {
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
-            container.layer?.transform = CATransform3DMakeScale(scale, scale, 1)
-        }
+        // Animation đặt thẳng trên lớp, không qua `NSAnimationContext` —
+        // cùng cách `fade()` đang làm.
+        //
+        // Trước đây dùng `NSAnimationContext` và đặt ảnh bằng `layer.contents`
+        // tay lên `NSImageView`. AppKit sở hữu ô nhớ đó: mỗi lần vẽ lại view
+        // (rất dễ xảy ra khi lớp cha đổi transform — tức đúng lúc widget
+        // "nâng" lên khi bạn giữ chuột) nó chạy `draw()` với không có image và
+        // xoá sạch `contents`. Widget mất trắng, chỉ tới lần đổi ảnh kế tiếp mới
+        // hiện lại. Nay `ImageCanvas` tự vẽ trong `draw(_:)` nên AppKit vẽ lại
+        // bao nhiêu lần cũng ra đúng ảnh — ở đây không cần vá gì thêm.
+        guard let l = container.layer else { return }
+        let target = CATransform3DMakeScale(scale, scale, 1)
+        l.removeAnimation(forKey: "lift")
+        let a = CABasicAnimation(keyPath: "transform")
+        a.fromValue = l.transform
+        a.toValue = target
+        a.duration = 0.15
+        a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        l.add(a, forKey: "lift")
+        // Giá trị model phải khớp ngay, không thì animation chỉ chạy một lần.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        l.transform = target
+        CATransaction.commit()
     }
 
     var displayMaxPixel: CGFloat {

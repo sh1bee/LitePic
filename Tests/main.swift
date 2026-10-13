@@ -309,6 +309,54 @@ do {
     w.window.close()
 }
 
+// ============================================================
+print("H) Giu cho luoi bat roi tha -> ANH PHAI CON (khong mat trang)")
+// ============================================================
+// Hoi quy cho loi "giu widget la no bien mat, chi hoi lai khi doi anh".
+//
+// `imageView`/`topView` ve anh bang `layer.contents`. Neu `contents` bi xoa
+// ve nil, cua so van con (chuot phai bat duoc, van nhin thay vi tri) nhung
+// KHONG CON GI DE VE -> widget trong trang. Do truc tiep `contents`, khong
+// do pixel: pixel chi cho biet "co/khong", `contents` cho biet TAI SAO.
+do {
+    let (w, view) = makeWidget()
+    let M = { (o: Any, _ l: String) -> Any? in
+        Mirror(reflecting: o).children.first { $0.label == l }?.value }
+    let imageView = M(w, "imageView") as! ImageCanvas
+    let topView = M(w, "topView") as! ImageCanvas
+    func hasImage() -> Bool {
+        imageView.image != nil || topView.image != nil
+    }
+
+    // Anh nap xong truoc khi do — do qua `contents` ma anh chua nap thi vo nghia.
+    let t0 = Date()
+    while !hasImage() && Date().timeIntervalSince(t0) < 8 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    }
+
+
+    let s0 = NSPoint(x: w.window.frame.minX + 70, y: w.window.frame.minY + 70)
+    var imageAfterDrop = false
+    let gDrop = view.session.onDrop
+    view.session.onDrop = { r in
+        gDrop?(r)                      // giữ nguyên wiring của app
+        // finishDrop đã chạy xong; đợi nét vẽ chính rồi mới đo.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            imageAfterDrop = hasImage()
+        }
+    }
+
+    after(1.6) { post(ev(.leftMouseUp, s0, w.window)) }
+    view.mouseDown(with: ev(.leftMouseDown, s0, w.window))
+    RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+
+    line(hasImage(), "anh con ngay khi luoi bat (khong mat lúc giơ luoi)")
+    line(imageAfterDrop, "anh con sau khi tha chuot",
+         imageAfterDrop ? "" : "contents = nil — widget trong trang")
+    w.window.close()
+}
+
+// ============================================================
 print("")
 print("Xong.")
 exit(0)

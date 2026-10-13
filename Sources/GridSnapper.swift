@@ -14,34 +14,49 @@ enum GridSnapper {
 
     /// Bố cục lưới cho widget cỡ `size` trên màn hình `visible`.
     ///
-    /// Tối đa 6×4 ô (ô phải vừa để chứa), cộng thêm bốn ô sát mép màn hình —
-    /// đó là chỗ người dùng hay đặt widget nhất. Ô sát mép trùng với ô lưới
-    /// thì bỏ, tránh hai chỗ chồng nhau.
+    /// **Ô đè lên nhau một nửa**: bước nhảy bằng `nửa cỡ widget`, nên widget
+    /// đặt được lệch ra nửa ô — chọn được nhiều chỗ hơn hẳn lưới thưa (bước =
+    /// cả cỡ widget), vốn chỉ cho vài vị trí "bắt vào".
+    ///
+    /// Cộng thêm bốn ô sát mép màn hình — đó là chỗ người dùng hay đặt widget
+    /// nhất. Ô sát mép trùng với ô lưới thì bỏ, tránh hai chỗ chồng nhau.
+    ///
+    /// Mỗi ô đúng bằng `size`. Cỡ này do `WidgetWindow` truyền vào lúc giơ
+    /// lưới nên widget vừa đổi ảnh (đổi tỉ lệ, đổi cỡ) thì ô bám theo ngay —
+    /// không phải kích thước cứng từ lúc dựng.
     static func slots(widgetSize size: NSSize, visibleFrame vf: NSRect) -> [NSPoint] {
         let margin: CGFloat = 36
-        let gutter: CGFloat = 18
-        let usableW = vf.width - margin * 2
-        let usableH = vf.height - margin * 2
-
-        // Widget to hơn vùng dùng được thì vẫn phải có ít nhất một ô, và ô
-        // phải vừa chứa widget — không phải ô bằng phần chia sẻ lưới.
         guard size.width > 0, size.height > 0 else { return [] }
+        // Widget to hơn vùng dùng được thì không ô nào vừa — trả rỗng để
+        // `armSnapMode` bỏ qua lưới, thay vì vẽ ô tràn ra ngoài màn hình.
+        let spanX = vf.width - margin * 2 - size.width
+        let spanY = vf.height - margin * 2 - size.height
+        guard spanX >= 0, spanY >= 0 else { return [] }
 
-        let cols = max(1, min(6, Int((usableW + gutter) / (size.width + gutter))))
-        let rows = max(1, min(4, Int((usableH + gutter) / (size.height + gutter))))
-        // Cố tình KHÔNG ép `cw >= size.width`: khi widget rộng hơn ô lưới, gốc
-        // tính `(cw - size.width)/2` âm, đẩy widget dịch sang trái — và đó mới
-        // là điều đúng, vì nó giữ widget nằm trọn trong màn hình. Thử "sửa"
-        // bằng `max()` đã làm widget tràn ra ngoài mép phải.
-        let cw = (usableW - gutter * CGFloat(cols - 1)) / CGFloat(cols)
-        let ch = (usableH - gutter * CGFloat(rows - 1)) / CGFloat(rows)
+        // Widget nhỏ trên màn hình lớn thì lưới nửa-ô có thể lên hàng trăm ô,
+        // mỗi ô một lớp — vừa nặng vừa rối mắt. Có trần số ô; vượt trần thì
+        // giãn bước nhảy cho tới khi vừa. Khi số ô vừa phải thì giữ nguyên
+        // nửa-ô.
+        let maxCells = 240
+        func count(span: CGFloat, step: CGFloat) -> Int {
+            span <= 0 ? 1 : Int(span / step) + 1
+        }
+        var stepX = size.width / 2
+        var stepY = size.height / 2
+        while count(span: spanX, step: stepX) * count(span: spanY, step: stepY) > maxCells {
+            stepX *= 1.2
+            stepY *= 1.2
+        }
 
+        let nx = count(span: spanX, step: stepX)
+        let ny = count(span: spanY, step: stepY)
         var out: [NSPoint] = []
-        for r in 0..<rows {
-            for c in 0..<cols {
+        out.reserveCapacity(nx * ny + 4)
+        for r in 0..<ny {
+            for c in 0..<nx {
                 out.append(NSPoint(
-                    x: vf.minX + margin + CGFloat(c) * (cw + gutter) + (cw - size.width) / 2,
-                    y: vf.maxY - margin - CGFloat(r) * (ch + gutter) - ch + (ch - size.height) / 2))
+                    x: vf.minX + margin + CGFloat(c) * stepX,
+                    y: vf.maxY - margin - size.height - CGFloat(r) * stepY))
             }
         }
 

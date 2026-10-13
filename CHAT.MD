@@ -7,7 +7,7 @@ Không sửa code khi chưa ghi rõ vì sao sửa. Ưu tiên đo trước, sửa
 
 ---
 
-## VẤN ĐỀ 1 — Widget thi thoảng không kéo được (đang mở)
+## VẤN ĐỀ 1 — Widget thi thoảng không kéo được (ĐÃ GIẢI)
 
 **Triệu chứng**
 - Bấm kéo widget: đôi lúc được, đôi lúc không. Không có mẫu hình rõ ràng.
@@ -19,28 +19,34 @@ Không sửa code khi chưa ghi rõ vì sao sửa. Ưu tiên đo trước, sửa
 - Lưới hiện đúng lúc giữ đủ 2s — **chụp màn hình thật**, đối chiếu trước/sau.
 - Overlay ẩn đúng sau khi thả — cũng bằng ảnh chụp.
 
-**Cảnh báo về phép kiểm thử hiện tại**
-Các test cũ gọi thẳng `view.mouseDown(with:)` — **bỏ qua toàn bộ đường đi thật của chuột**.
-Chúng không chứng minh widget có nhận được click từ window server hay không.
-Log "DUNG" của chúng **không có giá trị bằng chứng** cho lỗi này.
-→ Bắt buộc phải đo đường đi thật mới kết luận được.
+**Nguyên nhân thật: H1 — widget bị cửa sổ khác che.**
 
-**Giả thuyết (xếp theo độ khả năng)**
+Đã xác nhận bằng chứng: `levelMode = 0` (tầng desktop, dưới tầng 0) khiến widget
+**bị che và bấm không ăn**; đổi sang `1` (floating) thì mọi thao tác chạy bình thường.
+Đây là lý do "không có mẫu hình rõ ràng" — tùy cửa sổ app nào đang mở mà widget bị che
+hay không.
 
-| # | Giả thuyết | Cơ sở | Trạng thái |
-|---|---|---|---|
-| H1 | Widget ở tầng `desktop+20`, bị cửa sổ app khác che nên không nhận click | Tầng desktop thấp hơn tầng 0; ảnh bạn gửi cho thấy cửa sổ phủ gần hết màn hình | **Chưa kiểm chứng bằng sự kiện thật** |
-| H2 | `mouseDown` có tới nhưng `NSApp.nextEvent` nuốt mất sự kiện | Vòng lặp mới thay thế tracking chuẩn của AppKit | Chưa loại trừ |
-| H3 | `w.makeKey()` thất bại vì cửa sổ borderless không thể là key | Borderless không có title bar | Chưa kiểm chứng |
+Hai thứ bổ sung cho nhau:
+- `levelMode` mặc định là `1`. Không còn để `0` làm mặc định.
+- `autoLiftIfOccluded()` — nếu người dùng cố ý chọn `0` mà có cửa sổ khác đè lên,
+  app tự nâng lên tầng nổi. **Chỉ nâng, không tự hạ** (hạ xuống có thể khiến widget
+  chui xuống đúng lúc người dùng đang làm việc).
 
-**Việc tiếp — đo đường đi thật**
-Thêm `Diag.swift`, bật bằng: `defaults write local.litepic.widget diag -bool true`
-Log ra `~/Library/Logs/LitePic.log`:
-- `mouseDown` có tới view không, thuộc window nào
-- Widget có đang bị cửa sổ nào che không (danh sách occluder theo tầng)
-- Có rời khỏi `mouseDown` vì lý do gì
+**H2, H3 không còn cần kiểm** — đã có nguyên nhân giải thích được triệu chứng,
+và mô hình đó khớp với việc lỗi "đôi lúc" chứ không phải "luôn".
 
-→ Rồi tái hiện lỗi 1 lần, đọc log. **Không sửa gì thêm cho tới khi có log.**
+### Bài học từ lỗi này
+
+Cách mô tả "đôi lúc được đôi lúc không" là **một chỉ dấu** chứ không phải lời phàn nàn
+vô nghĩa: nó thường nghĩa là điều kiện bên ngoài thay đổi (cửa sổ nào đang mở, widget
+ở tầng nào, màn hình nào), chứ không phải logic bên trong có chỗ sai. Tôi đã dành
+nhiều thời gian tìm lỗi trong vòng lặp chuột trong khi lỗi nằm ở tầng cửa sổ.
+
+### Kiểm chứng bằng bộ test thật (7 tình huống)
+
+Đã dựng `Tests/main.swift` + `test.sh`, chạy trên vòng lặp sự kiện thật — không gọi
+hàm nội bộ. Cả 7 tình huống đạt, gồm cả **thả chuột ra ngoài cửa sổ** (tình huống E)
+vốn là chỗ dễ kẹt trạng thái. Chi tiết và 3 bẫy khi viết phép đo: xem README mục 5 và 7.
 
 
 ## GHI CHÚ ĐÃ BIẾT
@@ -124,11 +130,50 @@ cách gọi thẳng hàm bỏ qua đường đi chuột thật.
 
 ### 4. Con số cuối
 
-- **Rảnh (không đổi ảnh): 0.0000% CPU**, footprint phẳng 19 MB. Về mặt năng
-  lượng thì không khác gì một widget nền tĩnh của macOS.
-- **Khi đổi ảnh mỗi 15 giây:** footprint đi ngang 16–25 MB, không tăng theo số ảnh
-  đã xem. RAM **không phình theo thời gian** — đây là điều quan trọng nhất.
+- **Rảnh:** 27/28 mốc đọc CPU = 0.0%, một mốc 0.1% (đúng lúc timer 60s đổi ảnh).
+  Về mặt năng lượng thì không khác gì một widget nền tĩnh của macOS.
+- **Footprint là BƯỚC THANG, không phải đường phẳng.** 28 mốc trong ~10 phút:
+  nhỏ nhất 19.4 MB, lớn nhất 23.5 MB, trung bình 22.1 MB, biên độ 4.1 MB.
+- RAM **không phình theo thời gian** — biên độ 4MB là LRU nhả-giữ, không phải rò rỉ.
+
+**Lỗi tôi từng mắc khi ghi con số này:** viết "footprint phẳng 19 MB" sau khi đo
+đúng 5 lần. Đo tiếp 28 lần mới thấy nó dao động 19.4–23.5 theo bậc thang. Hai lời
+phán sai, theo hai hướng ngược nhau:
+- Đo 1 lần lúc mới mở → "chỉ 11 MB" (thiếu phần nạp cache).
+- Đo 5 lần lúc yên → "nó phẳng 23.2 MB" (hên đúng lúc cache chưa đổi).
+
+Phải đo **nhiều mốc**, và phải hiểu hình dạng đường đo. Rò rỉ thật là **đường
+thẳng dốc lên đều**; LRU là **bậc thang lên xuống**.
+
 - 4 luồng, 0 dependency, 0 network, 0 Finder.
+
+### 6. Ba bẫy khi viết phép đo (gặp thật khi dựng bộ test kéo)
+
+**a) Gán đè callback để quan sát — xoá luôn thứ đang đo.**
+```swift
+view.session.onDrop = { r in ... }   // SAI: đè wiring của app
+```
+`onDrop` vốn được `WidgetWindow.init` gán cho `finishDrop` — ghi đè thì `finishDrop`
+không bao giờ chạy, widget không bao giờ khe vào ô — nhưng phép đo **vẫn "đạt"** vì
+nó chỉ ghi lại đúng thứ chính nó vừa ghi vào. Tôi đã mất rất nhiều thời gian vì việc
+này: cả 2 phiên bản (cũ và mới) đều cho "0 ô lưới", tưởng refactor làm hỏng.
+Đúng cách:
+```swift
+let g = s.onDrop
+s.onDrop = { g?($0); /* phần quan sát của mình */ }
+```
+
+**b) So toạ độ tuyệt đối — AppKit làm tròn góc cửa sổ ra số nguyên.**
+Ô lưới ở (526.75, 437.5), widget khe đúng nhưng `window.frame.origin` thành
+(526.0, 437.0) → lệch 0.901pt. Ngưỡng 0.5pt sẽ báo "KHÔNG khe" cho một cú khe
+hoàn toàn đúng. Ngưỡng đúng: **≤ 1.5pt** (= √(0.75² + 0.5²)).
+
+**c) Event sót chảy sang tình huống test kế tiếp.**
+Nhấp đúp (`clickCount == 2`) **trả về sớm**, không đi vào vòng lặp, nên không ăn
+`mouseUp` mà chính test đã post. Sự kiện đó còn trong hàng đợi và làm tình huống
+tiếp theo kết thúc ngay bằng `.click`. Tôi từng kết luận "lưới không bật" trong
+khi chỉ là hàng đợi bị bẩn. Cần `drain` hàng đợi trước mỗi tình huống.
+
 
 ### 5. Bug tìm ra khi tối ưu
 

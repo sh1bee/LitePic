@@ -7,34 +7,40 @@ enum DropResult {
     case snap   // giữ đủ lâu rồi kéo/thả: khe vào lưới
 }
 
-/// View nhận chuột để kéo widget, và nhận chuột phải để mở menu.
+/// View phủ kín cửa sổ widget: nhận chuột để kéo, chuột phải để mở menu,
+/// rê chuột để hiện nút, và nhận file thả từ Finder.
 ///
-/// Tương tác lai, giống widget macOS:
-///   - Kéo ngay        -> đặt tự do, không bám lưới.
-///   - Giữ yên 2 giây -> hiện toàn bộ lưới, thả xuống tự khe vào ô gần nhất.
-///
-/// Toàn bộ một lần nhấn (giữ -> kéo -> thả) được xử lý trong vòng lặp theo dõi
-/// sự kiện ngay bên trong `mouseDown`. Cách này đảm bảo `mouseUp` luôn được
-/// nhận — kể cả khi thả chuột ở ngoài cửa sổ — nên không bao giờ kẹt ở trạng
-/// thái dở dang (lưới ma, widget phóng to kẹt, khe sai ở lần kéo sau).
+/// Phần xử lý nhấn – giữ – kéo – thả nằm ở `DragSession`; class này chỉ làm
+/// nhiệm vụ chuyển sự kiện của AppKit sang callback.
 final class DraggableView: NSView {
-    var onDrag: ((NSPoint) -> Void)?
-    var onSnapDrag: ((NSPoint) -> Void)?
-    var onDrop: ((DropResult) -> Void)?
-    /// Sau ~0.45s giữ yên: báo "sắp vào chế độ lưới".
-    var onHoldTick: (() -> Void)?
-    /// Đã báo chờ nhưng người dùng kéo luôn trước 2s: gỡ hiệu ứng chờ.
-    var onHoldCancel: (() -> Void)?
-    /// Giữ đủ 2s: bật chế độ lưới và hiện toàn bộ ô.
-    var onLongPress: (() -> Void)?
     /// Menu hiện khi bấm chuột phải — AppController gắn vào sau init.
     var contextMenu: NSMenu?
     /// Báo rê chuột vào/ra widget để hiện/ẩn nút điều khiển.
     var onHover: ((Bool) -> Void)?
-    /// Nhấp đúp: mở ảnh gốc trong Finder.
-    var onDoubleClick: (() -> Void)?
     /// Người dùng thả file/thư mục từ Finder vào widget.
     var onFilesDropped: (([URL]) -> Void)?
+
+    /// Phiên kéo hiện tại.
+    let session = DragSession()
+
+    private var tracking: NSTrackingArea?
+    private var hoverPushed = false
+
+    var isPressed: Bool { session.isPressed }
+    var isDragging: Bool { session.isDragging }
+
+    /// Mấu chốt để kéo hoạt động: `NSImageView` phủ kín toàn bộ cửa sổ, nên mặc
+    /// định hit-test trả về chính imageView và các sự kiện chuột không bao giờ
+    /// tới `DraggableView`. Mọi điểm trong biên đều trả về `self`.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        session.begin(in: self, event: event)
+    }
+
+    // MARK: - Kéo thả từ Finder
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         // Thả đúng lên cụm nút thì không nhận — nếu không, thả ảnh lên nút
@@ -55,38 +61,7 @@ final class DraggableView: NSView {
         return true
     }
 
-    /// Giữ bao lâu thì vào chế độ lưới.
-    ///
-    /// Đã giảm từ 2.0s xuống 1.2s: ở 2 giây người dùng dễ tưởng app treo và
-    /// thả chuột sớm. Log thực đo cho thấy mọi lần thử đều dưới 2s — không ai
-    /// chạm tới mốc cũ. 1.2s vẫn đủ dài để phân biệt với kéo tự do.
-    static let holdDuration: TimeInterval = 1.2
-    private static let hintDelay: TimeInterval = 0.25
-
-    /// Thời gian đứng yên sau khi đã kéo để bật chế độ lưới.
-    ///
-    /// Sửa theo cách hiểu của người dùng: kéo đi đâu cũng được, nhưng dừng lại
-    /// thì lưới vẫn hiện. Trước đây cứ chuyển động là huỷ lịch giữ — nên bấm
-    /// giữ rồi kéo (cách tôi nghĩ) hoạt động, còn kéo rồi dừng (cách bạn nghĩ)
-    /// thì không. Giờ cả hai đều được.
-    static let settleDuration: TimeInterval = 1.2
-    private static let moveThreshold: CGFloat = 3
-
-    /// Đang giữ chuột / đang kéo. WidgetWindow dùng để hoãn đổi ảnh giữa chừng.
-    private(set) var isPressed = false
-    private(set) var isDragging = false
-
-    private var grabOffset: NSPoint = .zero
-    private var tracking: NSTrackingArea?
-    private var hoverPushed = false
-    private var dragCursorPushed = false
-
-    /// Mấu chốt để kéo hoạt động: `NSImageView` phủ kín toàn bộ cửa sổ, nên mặc
-    /// định hit-test trả về chính imageView và các sự kiện chuột không bao giờ
-    /// tới `DraggableView`. Mọi điểm trong biên đều trả về `self`.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
-    }
+    // MARK: - Menu và rê chuột
 
     /// Bấm chuột phải: AppKit tự gọi hàm này và hiện menu trả về.
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu }
@@ -119,111 +94,15 @@ final class DraggableView: NSView {
         // Trong lúc kéo, cửa sổ trượt dưới con trỏ đứng yên cũng sinh ra
         // entered/exited — bỏ qua để không làm lệch ngăn xếp cursor.
         guard !isPressed, !isDragging else { return }
+        popHoverCursorIfNeeded()
+    }
+
+    /// Trả con trỏ rê nếu đang giữ. Tách riêng vì `DragSession` cần gọi lúc
+    /// kết thúc một lần nhấn, khi `mouseExited` có thể đã không tới.
+    func popHoverCursorIfNeeded() {
+        guard hoverPushed else { return }
         NSCursor.pop()
         hoverPushed = false
-    }
-
-    /// Vị trí chuột theo toạ độ màn hình.
-    ///
-    /// Ưu tiên toạ độ trong event (đúng khi event thuộc về cửa sổ này, gồm cả
-    /// event dựng sẵn trong kiểm thử). Nếu event thuộc cửa sổ khác — xảy ra khi
-    /// rê ra ngoài màn hình nền giữa lúc kéo — dùng vị trí con trỏ toàn cục.
-    private func screenPoint(_ event: NSEvent) -> NSPoint? {
-        guard let w = window else { return nil }
-        if event.windowNumber == w.windowNumber {
-            return w.convertPoint(toScreen: event.locationInWindow)
-        }
-        return NSEvent.mouseLocation
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        // Nhấp đúp mở Finder, không vào vòng kéo. Phải kiểm TRƯỚC mọi thứ khác
-        // vì `mouseDown` lần thứ hai của một cú nhấp đúp vẫn có `clickCount == 2`.
-        if event.clickCount >= 2 {
-            isPressed = false
-            onDoubleClick?()
-            return
-        }
-        guard let w = window else { return }
-        guard let p0 = screenPoint(event) else { return }
-        w.makeKey()
-        grabOffset = NSPoint(x: p0.x - w.frame.origin.x, y: p0.y - w.frame.origin.y)
-
-        isPressed = true
-        isDragging = false
-        var hinted = false
-        var armed = false
-        var moved = false
-        var lastMove = Date()      // lúc chuyển động gần nhất
-        let t0 = Date()
-
-        // Mọi đường thoát đều đi qua đây: trả cursor, hạ cờ.
-        defer {
-            if dragCursorPushed { NSCursor.pop(); dragCursorPushed = false }
-            // Chuột có thể đã ra ngoài view lúc thả: đồng bộ lại hover.
-            if hoverPushed, let w2 = window,
-               !bounds.contains(convert(w2.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)) {
-                NSCursor.pop()
-                hoverPushed = false
-            }
-            isPressed = false
-            isDragging = false
-        }
-
-        while true {
-            // Hẹn mốc cho lần giữ/đứng yên kế tiếp.
-            // Chưa kéo  -> đếm từ lúc nhấn.
-            // Đã kéo    -> đếm từ lần chuyển động gần nhất, nên kéo xong dừng lại
-            //              vẫn bật được lưới.
-            var deadline: Date? = nil
-            if !moved {
-                if !hinted { deadline = t0.addingTimeInterval(Self.hintDelay) }
-                else if !armed { deadline = t0.addingTimeInterval(Self.holdDuration) }
-            } else if !armed {
-                deadline = lastMove.addingTimeInterval(Self.settleDuration)
-            }
-
-            guard let e = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
-                                          until: deadline,
-                                          inMode: .eventTracking,
-                                          dequeue: true) else {
-                if !armed {
-                    if !hinted {
-                        hinted = true
-                        onHoldTick?()
-                    } else {
-                        armed = true
-                        onLongPress?()
-                    }
-                }
-                continue
-            }
-
-            if e.type == .leftMouseUp {
-                if moved {
-                    onDrop?(armed ? .snap : .free)
-                } else if armed {
-                    onDrop?(.snap)   // giữ đủ lâu rồi thả tại chỗ: khe tại chỗ
-                } else {
-                    if hinted { onHoldCancel?() }
-                    onDrop?(.click)
-                }
-                return
-            }
-
-            guard e.type == .leftMouseDragged, let p = screenPoint(e) else { continue }
-            if !moved {
-                if hypot(p.x - p0.x, p.y - p0.y) <= Self.moveThreshold { continue }
-                moved = true
-                isDragging = true
-                NSCursor.closedHand.push()
-                dragCursorPushed = true
-                if !armed, hinted { onHoldCancel?() }
-            }
-            lastMove = Date()
-            let origin = NSPoint(x: p.x - grabOffset.x, y: p.y - grabOffset.y)
-            if armed { onSnapDrag?(origin) } else { onDrag?(origin) }
-        }
     }
 }
 
@@ -400,18 +279,26 @@ final class WidgetWindow {
         w.ignoresMouseEvents = false
         w.orderOut(nil)
 
-        view.onDrag = { [weak self] o in self?.dragFree(to: o) }
-        view.onSnapDrag = { [weak self] o in self?.dragSnapped(to: o) }
-        view.onDrop = { [weak self] r in self?.finishDrop(r) }
-        view.onHoldTick = { [weak self] in self?.holdHint() }
-        view.onHoldCancel = { [weak self] in self?.cancelHoldHint() }
-        view.onLongPress = { [weak self] in self?.armSnapMode() }
+        let s = view.session
+        s.onDrag = { [weak self] o in self?.dragFree(to: o) }
+        s.onSnapDrag = { [weak self] o in self?.dragSnapped(to: o) }
+        s.onDrop = { [weak self] r in self?.finishDrop(r) }
+        s.onHint = { [weak self] in self?.holdHint() }
+        s.onHintCancel = { [weak self] in self?.cancelHoldHint() }
+        s.onArmed = { [weak self] in self?.armSnapMode() }
+        // Chuột có thể đã ra ngoài view lúc thả — đồng bộ lại con trỏ rê.
+        s.onEnd = { [weak view] in
+            guard let v = view, let w = v.window,
+                  !v.bounds.contains(v.convert(w.convertPoint(fromScreen: NSEvent.mouseLocation),
+                                                from: nil)) else { return }
+            v.popHoverCursorIfNeeded()
+        }
         view.onHover = { [weak self] hovering in
             guard let self else { return }
             self.container.isHidden = false
             self.controls.isHidden = !hovering
         }
-        view.onDoubleClick = { [weak self] in self?.revealCurrentInFinder() }
+        s.onDoubleClick = { [weak self] in self?.revealCurrentInFinder() }
         view.registerForDraggedTypes([.fileURL])
 
         applyAppearance()
@@ -732,49 +619,15 @@ final class WidgetWindow {
         return NSScreen.screens.first { NSMouseInRect(c, $0.frame, false) } ?? NSScreen.main
     }
 
-    /// Lưới tính theo kích thước widget (ô phải vừa để chứa), cộng thêm bốn ô
-    /// sát mép màn hình vì đó là chỗ đặt người dùng hay chọn nhất.
+    /// Lưới tính theo kích thước widget, cộng bốn ô sát mép màn hình.
+    /// Thuật toán nằm ở `GridSnapper` — không phụ thuộc AppKit nên kiểm chứng
+    /// được bằng phép tính.
     private func snapSlots(size: NSSize, on s: NSScreen) -> [NSPoint] {
-        let vf = s.visibleFrame
-        let margin: CGFloat = 36
-        let gutter: CGFloat = 18
-        let usableW = vf.width - margin * 2
-        let usableH = vf.height - margin * 2
-
-        let cols = max(1, min(6, Int((usableW + gutter) / (size.width + gutter))))
-        let rows = max(1, min(4, Int((usableH + gutter) / (size.height + gutter))))
-        let cw = (usableW - gutter * CGFloat(cols - 1)) / CGFloat(cols)
-        let ch = (usableH - gutter * CGFloat(rows - 1)) / CGFloat(rows)
-
-        var out: [NSPoint] = []
-        for r in 0..<rows {
-            for c in 0..<cols {
-                out.append(NSPoint(
-                    x: vf.minX + margin + CGFloat(c) * (cw + gutter) + (cw - size.width) / 2,
-                    y: vf.maxY - margin - CGFloat(r) * (ch + gutter) - ch + (ch - size.height) / 2))
-            }
-        }
-
-        let edges: [NSPoint] = [
-            NSPoint(x: vf.minX + margin, y: vf.maxY - margin - size.height),
-            NSPoint(x: vf.maxX - margin - size.width, y: vf.maxY - margin - size.height),
-            NSPoint(x: vf.minX + margin, y: vf.minY + margin),
-            NSPoint(x: vf.maxX - margin - size.width, y: vf.minY + margin),
-        ]
-        for p in edges where !out.contains(where: { abs($0.x - p.x) < 0.5 && abs($0.y - p.y) < 0.5 }) {
-            out.append(p)
-        }
-        return out
+        GridSnapper.slots(widgetSize: size, visibleFrame: s.visibleFrame)
     }
 
     private func nearestIndex(in slots: [NSPoint], to origin: NSPoint) -> Int? {
-        var best: Int? = nil
-        var bd = CGFloat.greatestFiniteMagnitude
-        for (i, p) in slots.enumerated() {
-            let d = hypot(p.x - origin.x, p.y - origin.y)
-            if d < bd { bd = d; best = i }
-        }
-        return best
+        GridSnapper.nearest(in: slots, to: origin)
     }
 
     /// Tính lại lưới khi đổi màn hình giữa lúc kéo. Cùng một mảng `activeSlots`

@@ -65,7 +65,6 @@ final class Settings {
         static let height        = "height"
         static let maxEdge       = "maxEdge"
         static let opacity       = "opacity"
-        static let interactive   = "interactive"
         static let snapToGrid   = "snapToGrid"
         static let renderScale  = "renderScale"
         static let fillMode     = "fillMode"
@@ -149,11 +148,6 @@ final class Settings {
     var opacity: CGFloat {
         get { d.object(forKey: K.opacity) == nil ? 1 : CGFloat(d.double(forKey: K.opacity)) }
         set { d.set(Double(newValue), forKey: K.opacity) }
-    }
-
-    var interactive: Bool {
-        get { d.bool(forKey: K.interactive) }
-        set { d.set(newValue, forKey: K.interactive) }
     }
 
     /// Bật thì widget luôn "hít" vào ô lưới gần nhất khi thả — không đặt tùy ý.

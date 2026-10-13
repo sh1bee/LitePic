@@ -15,6 +15,11 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var screenAsleep = false
     /// Đang có một lần thử đổi ảnh hoãn vì người dùng đang kéo widget.
     private var retryScheduled = false
+    private var rescanPending = false
+    private var rescanScheduled = false
+
+    /// Theo dõi thay đổi trong thư mục ảnh, để không phải bấm Reload tay.
+    private let watcher = FolderWatcher()
 
     private static let intervalChoices: [(String, Int)] = [
         ("15 giây", 15), ("30 giây", 30), ("1 phút", 60),
@@ -34,6 +39,22 @@ final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Vòng đời
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Theo dõi thư mục: thêm/xoá ảnh thì tự cập nhật, không cần bấm lại menu.
+        // Cờ `rescan` để gom nhiều sự kiện FSEvents liên tiếp thành một lần quét.
+        watcher.onChange = { [weak self] in
+            guard let self else { return }
+            self.rescanPending = true
+            if !self.rescanScheduled {
+                self.rescanScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    guard let self else { return }
+                    self.rescanScheduled = false
+                    guard self.rescanPending else { return }
+                    self.rescanPending = false
+                    self.reload()
+                }
+            }
+        }
         installStatusItem()
         watchScreenState()
         reload()
@@ -46,6 +67,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
         timer = nil
+        watcher.stop()
     }
 
     // MARK: - Thanh menu
@@ -249,8 +271,13 @@ final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Nguồn ảnh
 
     private func reload() {
-        images = ImageStore.files(in: settings.folders)
+        let folders = settings.folders
+        images = ImageStore.files(in: folders)
         lastIndex = -1
+        // Theo dõi đúng các thư mục đang dùng — vị trí có thể đổi sau khi
+        // bookmark giải ra đường dẫn thật.
+        watcher.watch(folders)
+        Diag.log("reload: \(images.count) anh tu \(folders.count) thu muc")
         rebuildMenu()
         scheduleTimer()
         pruneCache()

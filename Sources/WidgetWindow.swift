@@ -487,9 +487,18 @@ final class WidgetWindow {
         }
         // Bóng ôm mép ẢNH, không phải mép cửa sổ. Nhờ `pad` chừa sẵn chỗ nên
         // bông bóng lan ra được mà không bị mép cửa sổ cắt.
-        let r = settings.frameStyle.imageCorner
-        l.shadowPath = CGPath(roundedRect: imageView.frame,
-                              cornerWidth: r, cornerHeight: r, transform: nil)
+        //
+        // Vì sao bo góc của đường bóng PHẢI rộng hơn bo góc của ảnh: bộ lọc
+        // Gaussian lan ra mọi phía, nên nó lấn vào cả phần khuyết ở góc. Bo góc
+        // 20pt gặp blur 14pt là bị lấn gần hết — nhìn ra bóng có hình chữ nhật
+        // chứ không phải bo góc. Nới rộng đường bông bóng trước khi blur thì
+        // kết quả sau blur mới tròn đúng như ảnh.
+        let blur = CGFloat(l.shadowRadius)
+        let r = settings.frameStyle.imageCorner + blur * 0.75
+        let grow = blur * 0.35
+        l.shadowPath = CGPath(
+            roundedRect: imageView.frame.insetBy(dx: -grow, dy: -grow),
+            cornerWidth: r, cornerHeight: r, transform: nil)
     }
 
     /// Đặt cụm nút trong góc trên phải của vùng ảnh, chồm lên viền.

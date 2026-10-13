@@ -41,11 +41,15 @@ enum FrameStyle: Int, CaseIterable {
     /// Hở này là chỗ cho bóng đổ lan ra, chứ không phải viền trang trí. Bản cũ
     /// để cố định 20pt cho mọi kiểu — nên "Không khung" vẫn thấy một dải tối
     /// quanh ảnh, vì bóng được vẽ theo mép cửa sổ chứ không theo mép ảnh.
+    ///
+    /// Với bóng: Gaussian 14pt lan ra khoảng 1.5 lần bán kính mỗi phía, cộng
+    /// thêm phần đường bóng được nới ra — tổng cỡ 24pt. Hở nhỏ hơn thì mép cửa
+    /// sổ cắt bóng, để lại một cạnh thẳng cứng cắt ngang góc bo.
     var pad: CGFloat {
         switch self {
         case .none:    return 0    // không bóng -> ảnh áp sát mép cửa sổ
-        case .shadow:  return 16   // vừa đủ cho bông bóng 14pt
-        case .glass:   return 8
+        case .shadow:  return 26
+        case .glass:   return 10
         case .polaroid: return 8
         case .film:    return 8
         }

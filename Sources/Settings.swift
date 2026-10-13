@@ -54,18 +54,30 @@ final class Settings {
         static let renderScale  = "renderScale"
         static let cornerRadius = "cornerRadius"
         static let levelMode    = "levelMode"
+        static let changeOnWake = "changeOnWake"
+        static let pinned     = "pinnedURL"
+        static let frameStyle = "frameStyle"
         static let posX          = "posX"
         static let posY          = "posY"
     }
 
     // MARK: - Nguồn ảnh
 
-    var folderPaths: [String] {
-        get { d.stringArray(forKey: K.folders) ?? [] }
-        set { d.set(newValue, forKey: K.folders) }
+    /// Thư mục ảnh. Đọc từ bookmark trước, rồi mới tới đường dẫn thường — bookmark
+    /// giữ được thư mục trong Drive/iCloud kể cả khi đường dẫn đã đổi.
+    var folders: [URL] {
+        let marked = Bookmarks.resolve()
+        if !marked.isEmpty { return marked }
+        return folderPaths.map { URL(fileURLWithPath: $0) }
     }
 
-    var folders: [URL] { folderPaths.map { URL(fileURLWithPath: $0) } }
+    var folderPaths: [String] {
+        get { d.stringArray(forKey: K.folders) ?? [] }
+        set {
+            d.set(newValue, forKey: K.folders)
+            Bookmarks.save(newValue.map { URL(fileURLWithPath: $0) })
+        }
+    }
 
     // MARK: - Tần suất đổi ảnh
 
@@ -143,6 +155,23 @@ final class Settings {
     var levelMode: LevelMode {
         get { LevelMode(rawValue: d.integer(forKey: K.levelMode)) ?? .floating }
         set { d.set(newValue.rawValue, forKey: K.levelMode) }
+    }
+
+    /// Đổi ảnh mỗi lần thức Mac khỏi chế độ ngủ.
+    var changeOnWake: Bool {
+        get { d.bool(forKey: K.changeOnWake) }
+        set { d.set(newValue, forKey: K.changeOnWake) }
+    }
+
+    var frameStyle: FrameStyle {
+        get { FrameStyle(rawValue: d.integer(forKey: K.frameStyle)) ?? .shadow }
+        set { d.set(newValue.rawValue, forKey: K.frameStyle) }
+    }
+
+    /// Ảnh đang ghim — không bị đổi bởi timer cho tới khi bỏ ghim.
+    var pinnedURL: String? {
+        get { d.string(forKey: K.pinned) }
+        set { d.set(newValue, forKey: K.pinned) }
     }
 
     var savedOrigin: NSPoint? {

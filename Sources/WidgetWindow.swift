@@ -29,12 +29,19 @@ final class DraggableView: NSView {
     var onLongPress: (() -> Void)?
     /// Menu hiện khi bấm chuột phải — AppController gắn vào sau init.
     var contextMenu: NSMenu?
+    /// Báo rê chuột vào/ra widget để hiện/ẩn nút điều khiển.
+    var onHover: ((Bool) -> Void)?
 
     /// Tạm cho kiểm thử quan sát callback (gỡ khi xong).
     struct debugHooks { static var onLongPress: (() -> Void)? }
 
-    static let holdDuration: TimeInterval = 2.0
-    private static let hintDelay: TimeInterval = 0.45
+    /// Giữ bao lâu thì vào chế độ lưới.
+    ///
+    /// Đã giảm từ 2.0s xuống 1.2s: ở 2 giây người dùng dễ tưởng app treo và
+    /// thả chuột sớm. Log thực đo cho thấy mọi lần thử đều dưới 2s — không ai
+    /// chạm tới mốc cũ. 1.2s vẫn đủ dài để phân biệt với kéo tự do.
+    static let holdDuration: TimeInterval = 1.2
+    private static let hintDelay: TimeInterval = 0.25
     private static let moveThreshold: CGFloat = 3
 
     /// Đang giữ chuột / đang kéo. WidgetWindow dùng để hoãn đổi ảnh giữa chừng.
@@ -72,12 +79,14 @@ final class DraggableView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        onHover?(true)
         guard !isPressed, !isDragging, !hoverPushed else { return }
         NSCursor.pointingHand.push()
         hoverPushed = true
     }
 
     override func mouseExited(with event: NSEvent) {
+        onHover?(false)
         guard hoverPushed else { return }
         // Trong lúc kéo, cửa sổ trượt dưới con trỏ đứng yên cũng sinh ra
         // entered/exited — bỏ qua để không làm lệch ngăn xếp cursor.
@@ -276,8 +285,13 @@ final class WidgetWindow {
         }
     }
 
+    private let controls = WidgetControls()
     private var imageSize = NSSize(width: 400, height: 300)
     private var settled = false
+
+    /// Khoảng trống chừa quanh ảnh cho khung hiện tại.
+    private var frameInset: CGFloat { settings.frameStyle.inset }
+    private var frameBottom: CGFloat { settings.frameStyle.extraBottom }
     private var snapMode = false
     private var activeSlots: [NSPoint] = []
     private weak var activeScreen: NSScreen?
@@ -303,6 +317,8 @@ final class WidgetWindow {
 
         w.contentView = view
         view.addSubview(iv)
+        controls.isHidden = true
+        view.addSubview(controls)
 
         w.isOpaque = false
         w.backgroundColor = .clear
@@ -320,6 +336,11 @@ final class WidgetWindow {
         view.onHoldTick = { [weak self] in self?.holdHint() }
         view.onHoldCancel = { [weak self] in self?.cancelHoldHint() }
         view.onLongPress = { [weak self] in self?.armSnapMode() }
+        view.onHover = { [weak self] hovering in
+            guard let self else { return }
+            self.container.isHidden = false
+            self.controls.isHidden = !hovering
+        }
 
         applyAppearance()
         overlay.setLevel(activeLevel)
@@ -334,7 +355,7 @@ final class WidgetWindow {
     // MARK: - Ngoại hình
 
     private func applyAppearance() {
-        let r = settings.cornerRadius
+        let r = settings.frameStyle.imageCorner
         container.layer?.cornerRadius = r
         container.layer?.cornerCurve = .continuous
         container.layer?.masksToBounds = false
@@ -377,11 +398,39 @@ final class WidgetWindow {
     }
 
     private func layout() {
-        window.setContentSize(NSSize(width: imageSize.width + Self.pad * 2,
-                                     height: imageSize.height + Self.pad * 2))
+        let i = frameInset, b = frameBottom
+        // Khung ăn vào khoảng trống ngoài; đệm bóng vẫn chừa như cũ.
+        window.setContentSize(NSSize(width: imageSize.width + (i + Self.pad) * 2,
+                                     height: imageSize.height + (i + Self.pad) * 2 + b))
         container.frame = container.bounds
-        imageView.frame = NSRect(x: Self.pad, y: Self.pad,
+        imageView.frame = NSRect(x: i + Self.pad, y: i + Self.pad,
                                  width: imageSize.width, height: imageSize.height)
+        settings.frameStyle.decorate(in: container, imageRect: imageView.frame)
+        layoutControls()
+    }
+
+    /// Đặt cụm nút trong góc trên phải của vùng ảnh, chồm lên viền.
+    private func layoutControls() {
+        let inset: CGFloat = 8
+        controls.place(inside: NSSize(width: imageSize.width, height: imageSize.height),
+                       offset: CGPoint(x: imageSize.width - inset, y: imageSize.height - inset))
+    }
+
+    /// Hiện / ẩn nút điều khiển.
+    func setControlsVisible(_ v: Bool) {
+        guard !container.isPressed else { return }
+        controls.isHidden = !v
+    }
+
+    func setPinned(_ p: Bool) { controls.isPinned = p }
+
+    /// Gắn hành động cho nút — AppController nối vào danh sách ảnh.
+    func wireControls(onPrev: @escaping () -> Void,
+                     onNext: @escaping () -> Void,
+                     onPin: @escaping () -> Void) {
+        controls.onPrev = onPrev
+        controls.onNext = onNext
+        controls.onTogglePin = onPin
     }
 
     // MARK: - Hiển thị
@@ -520,8 +569,8 @@ final class WidgetWindow {
 
     // MARK: - Kéo
 
-    /// Giữ ~0.45s: nhấc nhẹ widget để báo hiệu "đang chờ vào chế độ lưới".
-    private func holdHint() { lift(1.03) }
+    /// Giữ ~0.25s: nhấc nhẹ widget để báo hiệu "đang giữ, sắp vào chế độ lưới".
+    private func holdHint() { lift(1.04) }
 
     private func cancelHoldHint() { lift(1.0) }
 

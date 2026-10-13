@@ -8,6 +8,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var images: [URL] = []
     private var lastIndex: Int = -1
+
+    /// Ảnh đang ghim — bộ đếm bỏ qua nó để không đổi vô ích.
+    private var isPinned: Bool { settings.pinnedURL != nil }
     private var paused = false
     private var screenAsleep = false
 
@@ -32,6 +35,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         installStatusItem()
         watchScreenState()
         reload()
+        widget.wireControls(onPrev: { [weak self] in self?.step(-1) },
+                            onNext: { [weak self] in self?.step(1) },
+                            onPin: { [weak self] in self?.togglePin() })
+        widget.setControlsVisible(false)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -59,8 +66,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) {
             [weak self] _ in
-            self?.screenAsleep = false
-            self?.scheduleTimer()
+            guard let self else { return }
+            self.screenAsleep = false
+            // Thức dậy là dịp tự nhiên để đổi ảnh — người dùng vừa từ chỗ
+            // tối sang, một bức mới hợp lý hơn bức đang chiếu lúc ngủ.
+            if settings.changeOnWake { self.advance() }
+            self.scheduleTimer()
         }
     }
 
@@ -105,6 +116,16 @@ final class AppController: NSObject, NSApplicationDelegate {
                 state: Int(settings.opacity * 100) == pct ? .on : .off)
         }
         m.addItem(submenu("Độ mờ", opacityMenu))
+
+        let frameMenu = NSMenu()
+        for f in FrameStyle.allCases {
+            add(frameMenu, f.title, #selector(pickFrame), tag: f.rawValue,
+                state: settings.frameStyle == f ? .on : .off)
+        }
+        m.addItem(submenu("Khung ảnh", frameMenu))
+
+        add(m, "Đổi ảnh khi thức dậy", #selector(toggleChangeOnWake),
+            state: settings.changeOnWake ? .on : .off)
         m.addItem(.separator())
 
         let hint = NSMenuItem(title: "Kéo xong là tự khe vào lưới", action: nil, keyEquivalent: "")
@@ -256,6 +277,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
             return
         }
+        // Ảnh đã ghim: đứng yên.
+        if isPinned { showPinnedIfNeeded(); return }
+
         var idx: Int
         if images.count == 1 {
             idx = 0
@@ -265,6 +289,44 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         lastIndex = idx
         widget.show(images[idx])
+    }
+
+    private func showPinnedIfNeeded() {
+        guard let p = settings.pinnedURL,
+              images.contains(where: { $0.path == p }) else { return }
+        if images[lastIndex].path != p, let i = images.firstIndex(where: { $0.path == p }) {
+            lastIndex = i
+            widget.show(images[i])
+        }
+    }
+
+    /// Bước tới ảnh kế tiếp/trước — có xét ảnh ghim.
+    private func step(_ delta: Int) {
+        guard !images.isEmpty else { return }
+        // pool các ảnh được phép hiện (bỏ ảnh đang ghim nếu còn ảnh khác)
+        var pool = images
+        if isPinned, images.count > 1 {
+            pool = images.filter { $0.path != settings.pinnedURL }
+        }
+        guard !pool.isEmpty else { return }
+        let cur = images[lastIndex]
+        let curInPool = pool.firstIndex(of: cur) ?? 0
+        let next = ((curInPool + delta) % pool.count + pool.count) % pool.count
+        if let i = images.firstIndex(of: pool[next]) {
+            lastIndex = i
+            widget.show(images[i])
+        }
+        rebuildMenu()
+    }
+
+    private func togglePin() {
+        if isPinned {
+            settings.pinnedURL = nil
+        } else if images.indices.contains(lastIndex) {
+            settings.pinnedURL = images[lastIndex].path
+        }
+        widget.setPinned(isPinned)
+        rebuildMenu()
     }
 
     private func applyAppearance() {
@@ -322,6 +384,18 @@ final class AppController: NSObject, NSApplicationDelegate {
         settings.renderScale = CGFloat(sender.tag)
         rebuildMenu()
         if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+    }
+
+    @objc private func pickFrame(_ sender: NSMenuItem) {
+        settings.frameStyle = FrameStyle(rawValue: sender.tag) ?? .shadow
+        widget.applyAll()
+        if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+        rebuildMenu()
+    }
+
+    @objc private func toggleChangeOnWake() {
+        settings.changeOnWake.toggle()
+        rebuildMenu()
     }
 
     @objc private func pickLevel(_ sender: NSMenuItem) {

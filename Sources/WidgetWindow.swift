@@ -33,6 +33,27 @@ final class DraggableView: NSView {
     var onHover: ((Bool) -> Void)?
     /// Nhấp đúp: mở ảnh gốc trong Finder.
     var onDoubleClick: (() -> Void)?
+    /// Người dùng thả file/thư mục từ Finder vào widget.
+    var onFilesDropped: (([URL]) -> Void)?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        // Thả đúng lên cụm nút thì không nhận — nếu không, thả ảnh lên nút
+        // "giai tiếp" sẽ bị hiểu thành đổi ảnh thay vì nhận file.
+        if let c = subviews.compactMap({ $0 as? WidgetControls }).first,
+           !c.isHidden,
+           c.frame.contains(convert(sender.draggingLocation, from: nil)) {
+            return []
+        }
+        return .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self]) as? [URL] ?? []
+        guard !urls.isEmpty else { return false }
+        onFilesDropped?(urls)
+        return true
+    }
 
     /// Giữ bao lâu thì vào chế độ lưới.
     ///
@@ -391,6 +412,7 @@ final class WidgetWindow {
             self.controls.isHidden = !hovering
         }
         view.onDoubleClick = { [weak self] in self?.revealCurrentInFinder() }
+        view.registerForDraggedTypes([.fileURL])
 
         applyAppearance()
         overlay.setLevel(activeLevel)
@@ -607,6 +629,11 @@ final class WidgetWindow {
         controls.onPrev = onPrev
         controls.onNext = onNext
         controls.onTogglePin = onPin
+    }
+
+    /// Nối xử lý khi người dùng thả file/thư mục từ Finder vào widget.
+    func wireDrop(_ handler: @escaping ([URL]) -> Void) {
+        container.onFilesDropped = handler
     }
 
     /// Mở ảnh gốc trong Finder, tô sáng file đó.

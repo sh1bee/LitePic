@@ -61,6 +61,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         widget.wireControls(onPrev: { [weak self] in self?.step(-1) },
                             onNext: { [weak self] in self?.step(1) },
                             onPin: { [weak self] in self?.togglePin() })
+        widget.wireDrop { [weak self] urls in self?.adoptDroppedFiles(urls) }
         widget.setControlsVisible(false)
     }
 
@@ -396,6 +397,53 @@ final class AppController: NSObject, NSApplicationDelegate {
         if let i = images.firstIndex(of: pool[next]) {
             lastIndex = i
             widget.show(images[i])
+        }
+        rebuildMenu()
+    }
+
+    /// Người dùng thả file/thư mục từ Finder vào widget.
+    ///
+    ///   - Thả THƯ MỤC  -> thêm vào danh sách thư mục ảnh.
+    ///   - Thả ẢNH      -> thêm thư mục chứa nó (nếu chưa có), hiện ảnh đó và
+    ///                     ghim lại. Ghim vì người dùng chọn đúng ảnh này, không
+    ///                     phải đợi timer tình cờ quay lại tới.
+    private func adoptDroppedFiles(_ urls: [URL]) {
+        let fm = FileManager.default
+        var paths = settings.folderPaths
+        var changed = false
+
+        for u in urls {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: u.path, isDirectory: &isDir) else {
+                Diag.log("drop bo qua (khong ton tai): \(u.path)")
+                continue
+            }
+            let folder = isDir.boolValue ? u : u.deletingLastPathComponent()
+            if !paths.contains(folder.path) {
+                paths.append(folder.path)
+                changed = true
+            }
+        }
+        Diag.log("drop: \(urls.count) muc, \(changed ? "co thay doi" : "khong doi gi")")
+
+        if changed {
+            settings.folderPaths = paths
+            reload()
+        }
+
+        // Ảnh đầu tiên được thả: hiện và ghim.
+        let dropped = urls.filter {
+            ImageStore.supported.contains($0.pathExtension.lowercased())
+        }
+        guard let pick = dropped.first else {
+            if changed { widget.settleNow() }
+            return
+        }
+        if let i = images.firstIndex(where: { $0.path == pick.path }) {
+            lastIndex = i
+            widget.show(images[i], evenIfBusy: true)
+            settings.pinnedURL = images[i].path
+            widget.setPinned(true)
         }
         rebuildMenu()
     }

@@ -25,7 +25,7 @@ enum FrameStyle: Int, CaseIterable {
         }
     }
 
-    /// Khung phải chừa bao nhiêu (theo cạnh) cho ảnh, tính bằng điểm.
+    /// Bề dày khung tính từ mép ảnh ra ngoài (điểm).
     var inset: CGFloat {
         switch self {
         case .none:    return 0
@@ -33,6 +33,31 @@ enum FrameStyle: Int, CaseIterable {
         case .polaroid: return 22   // vien duoi day -> can nhieu o duoi hon
         case .film:    return 26
         case .glass:   return 14
+        }
+    }
+
+    /// Khoảng hở giữa mép khung và mép cửa sổ (điểm).
+    ///
+    /// Hở này là chỗ cho bóng đổ lan ra, chứ không phải viền trang trí. Bản cũ
+    /// để cố định 20pt cho mọi kiểu — nên "Không khung" vẫn thấy một dải tối
+    /// quanh ảnh, vì bóng được vẽ theo mép cửa sổ chứ không theo mép ảnh.
+    var pad: CGFloat {
+        switch self {
+        case .none:    return 0    // không bóng -> ảnh áp sát mép cửa sổ
+        case .shadow:  return 16   // vừa đủ cho bông bóng 14pt
+        case .glass:   return 8
+        case .polaroid: return 8
+        case .film:    return 8
+        }
+    }
+
+    /// Độ đậm bóng. 0 = không bóng — dùng để "Không khung" thật sự trần.
+    var shadowOpacity: Float {
+        switch self {
+        case .none:   return 0
+        case .shadow: return 0.34
+        case .glass:  return 0.16
+        default:      return 0.26
         }
     }
 

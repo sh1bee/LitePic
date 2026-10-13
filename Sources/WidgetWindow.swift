@@ -307,7 +307,6 @@ final class WidgetWindow {
     private let overlay = GridOverlay(level: NSWindow.Level(
         rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 21))
 
-    private static let pad: CGFloat = 20
     private static let desktopLevel: NSWindow.Level = {
         NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 20)
     }()
@@ -332,6 +331,7 @@ final class WidgetWindow {
     /// Khoảng trống chừa quanh ảnh cho khung hiện tại.
     private var frameInset: CGFloat { settings.frameStyle.inset }
     private var frameBottom: CGFloat { settings.frameStyle.extraBottom }
+    private var framePad: CGFloat { settings.frameStyle.pad }
     private var snapMode = false
     private var activeSlots: [NSPoint] = []
     private weak var activeScreen: NSScreen?
@@ -348,7 +348,8 @@ final class WidgetWindow {
                          backing: .buffered, defer: false)
         window = w
 
-        let iv = NSImageView(frame: NSRect(x: Self.pad, y: Self.pad, width: 400, height: 300))
+        // Vị trí thật do `layout()` đặt; ở đây chỉ cần một khung tạm cho tới lúc đó.
+        let iv = NSImageView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         iv.autoresizingMask = []
         iv.imageScaling = .scaleProportionallyUpOrDown
         iv.imageAlignment = .alignCenter
@@ -395,12 +396,17 @@ final class WidgetWindow {
     // MARK: - Ngoại hình
 
     private func applyAppearance() {
-        let r = settings.frameStyle.imageCorner
-        container.layer?.cornerRadius = r
+        let f = settings.frameStyle
+        let r = f.imageCorner
+
+        // Lớp ngoài giữ vai trò nền: KHÔNG bo góc, KHÔNG cắt. Bo gốc và cắt là
+        // việc của imageView. Nếu bo cả lớp ngoài thì bóng sẽ ôm theo mép cửa
+        // sổ — tức là rộng hơn ảnh, nhìn ra ngay một dải tối quanh ảnh.
+        container.layer?.cornerRadius = 0
         container.layer?.cornerCurve = .continuous
         container.layer?.masksToBounds = false
         container.layer?.shadowColor = NSColor.black.cgColor
-        container.layer?.shadowOpacity = 0.34
+        container.layer?.shadowOpacity = f.shadowOpacity
         container.layer?.shadowRadius = 14
         container.layer?.shadowOffset = CGSize(width: 0, height: -6)
 
@@ -455,12 +461,11 @@ final class WidgetWindow {
     }
 
     private func layout() {
-        let i = frameInset, b = frameBottom
-        // Khung ăn vào khoảng trống ngoài; đệm bóng vẫn chừa như cũ.
-        window.setContentSize(NSSize(width: imageSize.width + (i + Self.pad) * 2,
-                                     height: imageSize.height + (i + Self.pad) * 2 + b))
+        let i = frameInset, b = frameBottom, p = framePad
+        window.setContentSize(NSSize(width: imageSize.width + (i + p) * 2,
+                                     height: imageSize.height + (i + p) * 2 + b))
         container.frame = container.bounds
-        imageView.frame = NSRect(x: i + Self.pad, y: i + Self.pad,
+        imageView.frame = NSRect(x: i + p, y: i + p,
                                  width: imageSize.width, height: imageSize.height)
         settings.frameStyle.decorate(in: container, imageRect: imageView.frame)
         layoutControls()
@@ -475,9 +480,15 @@ final class WidgetWindow {
     /// nặng hơn cả bước vẽ ảnh. Chỉ định `shadowPath` thì nó dùng luôn đường
     /// này, không phải làm gì.
     private func updateShadowPath() {
-        guard let l = container.layer, l.shadowOpacity > 0 else { return }
+        guard let l = container.layer else { return }
+        guard l.shadowOpacity > 0 else {
+            l.shadowPath = nil
+            return
+        }
+        // Bóng ôm mép ẢNH, không phải mép cửa sổ. Nhờ `pad` chừa sẵn chỗ nên
+        // bông bóng lan ra được mà không bị mép cửa sổ cắt.
         let r = settings.frameStyle.imageCorner
-        l.shadowPath = CGPath(roundedRect: container.bounds,
+        l.shadowPath = CGPath(roundedRect: imageView.frame,
                               cornerWidth: r, cornerHeight: r, transform: nil)
     }
 

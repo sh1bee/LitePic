@@ -42,6 +42,14 @@ final class DraggableView: NSView {
     /// chạm tới mốc cũ. 1.2s vẫn đủ dài để phân biệt với kéo tự do.
     static let holdDuration: TimeInterval = 1.2
     private static let hintDelay: TimeInterval = 0.25
+
+    /// Thời gian đứng yên sau khi đã kéo để bật chế độ lưới.
+    ///
+    /// Sửa theo cách hiểu của người dùng: kéo đi đâu cũng được, nhưng dừng lại
+    /// thì lưới vẫn hiện. Trước đây cứ chuyển động là huỷ lịch giữ — nên bấm
+    /// giữ rồi kéo (cách tôi nghĩ) hoạt động, còn kéo rồi dừng (cách bạn nghĩ)
+    /// thì không. Giờ cả hai đều được.
+    static let settleDuration: TimeInterval = 1.2
     private static let moveThreshold: CGFloat = 3
 
     /// Đang giữ chuột / đang kéo. WidgetWindow dùng để hoãn đổi ảnh giữa chừng.
@@ -132,6 +140,7 @@ final class DraggableView: NSView {
         var hinted = false
         var armed = false
         var moved = false
+        var lastMove = Date()      // lúc chuyển động gần nhất
         let t0 = Date()
 
         // Mọi đường thoát đều đi qua đây: trả cursor, hạ cờ.
@@ -148,24 +157,30 @@ final class DraggableView: NSView {
         }
 
         while true {
-            // Hạn chờ cho mốc tiếp theo — chỉ khi chưa di chuyển.
+            // Hẹn mốc cho lần giữ/đứng yên kế tiếp.
+            // Chưa kéo  -> đếm từ lúc nhấn.
+            // Đã kéo    -> đếm từ lần chuyển động gần nhất, nên kéo xong dừng lại
+            //              vẫn bật được lưới.
             var deadline: Date? = nil
             if !moved {
                 if !hinted { deadline = t0.addingTimeInterval(Self.hintDelay) }
                 else if !armed { deadline = t0.addingTimeInterval(Self.holdDuration) }
+            } else if !armed {
+                deadline = lastMove.addingTimeInterval(Self.settleDuration)
             }
+
             guard let e = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
                                           until: deadline,
                                           inMode: .eventTracking,
                                           dequeue: true) else {
-                if !moved {
-                    if !hinted { hinted = true; onHoldTick?(); continue }
-                    if !armed {
+                if !armed {
+                    if !hinted {
+                        hinted = true
+                        onHoldTick?()
+                    } else {
                         armed = true
-                        Diag.log("GIU DU 2s -> bat che do luoi")
                         debugHooks.onLongPress?()
                         onLongPress?()
-                        continue
                     }
                 }
                 continue
@@ -191,9 +206,9 @@ final class DraggableView: NSView {
                 isDragging = true
                 NSCursor.closedHand.push()
                 dragCursorPushed = true
-                // Di chuyển trước khi giữ đủ lâu -> huỷ hẹn giữ, kéo tự do.
                 if !armed, hinted { onHoldCancel?() }
             }
+            lastMove = Date()
             let origin = NSPoint(x: p.x - grabOffset.x, y: p.y - grabOffset.y)
             if armed { onSnapDrag?(origin) } else { onDrag?(origin) }
         }
@@ -395,6 +410,23 @@ final class WidgetWindow {
         // đúng thứ tự vẽ sau khi đổi tầng.
         window.orderFrontRegardless()
         Diag.describe(window, "  doi tang")
+    }
+
+    /// Tự chữa: nếu widget đang ở tầng desktop mà có cửa sổ khác che vùng đó,
+    /// thì đổi sang tầng floating để người dùng bấm được.
+    ///
+    /// Bổ sung cho lựa chọn trong menu — không bắt ai phải nhớ bấm. Chỉ tự
+    /// nâng lên, không tự hạ xuống (hạ xuống có thể khiến widget chui xuống dưới
+    /// cửa sổ đúng lúc người dùng đang làm việc).
+    @discardableResult
+    func autoLiftIfOccluded() -> Bool {
+        guard settings.levelMode == .desktop else { return false }
+        let hidden = NSApp.windows.filter { window !== $0 && $0.isVisible
+            && $0.frame.intersects(window.frame) && $0.level > window.level }
+        guard !hidden.isEmpty else { return false }
+        settings.levelMode = .floating
+        applyLevel()
+        return true
     }
 
     private func layout() {

@@ -215,6 +215,8 @@ final class AppController: NSObject, NSApplicationDelegate {
         if !images.isEmpty {
             ImageStore.prewarm(images, maxPixel: widget.displayMaxPixel)
             advance()
+            // Cửa sổ khác đang che widget? Tự nâng lên tầng nổi để bấm được.
+            if widget.autoLiftIfOccluded() { rebuildMenu() }
         }
     }
 

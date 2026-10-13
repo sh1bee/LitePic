@@ -17,10 +17,13 @@ enum SizeMode: Int, CaseIterable {
 
 /// Tầng hiển thị của widget.
 ///
-/// Vì sao cần: widget đặt ở tầng `desktop + 20` thì **luôn nằm dưới mọi cửa sổ
-/// app** (tầng 0). Chỉ cần một cửa sổ trình duyệt phủ qua vùng đó là mọi cú
-/// click rơi vào cửa sổ kia, widget không bao giờ nhận được sự kiện chuột.
-/// Đây là hành vi đúng như widget macOS, nhưng khó chịu khi màn hình bị phủ kín.
+/// Vì sao cần: widget đặt ở tầng `desktop + 20` (-2147483603) thì **luôn nằm dưới
+/// mọi cửa sổ app** (tầng 0). Chỉ cần một cửa sổ trình duyệt phủ qua vùng đó là
+/// mọi cú click rơi vào cửa sổ kia, widget không bao giờ nhận được sự kiện chuột —
+/// biểu hiện là "bấm vào widget thì dính desktop".
+///
+/// Đây là hành vi đúng như widget macOS, nhưng khó chịu khi màn hình bị phủ kín,
+/// nên mặc định đặt là `floating`.
 enum LevelMode: Int, CaseIterable {
     case desktop   // trên wallpaper, dưới cửa sổ app (giống widget macOS)
     case floating  // nổi trên cửa sổ app — luôn bấm/kéo được

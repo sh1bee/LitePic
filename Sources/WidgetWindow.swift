@@ -31,6 +31,8 @@ final class DraggableView: NSView {
     var contextMenu: NSMenu?
     /// Báo rê chuột vào/ra widget để hiện/ẩn nút điều khiển.
     var onHover: ((Bool) -> Void)?
+    /// Nhấp đúp: mở ảnh gốc trong Finder.
+    var onDoubleClick: (() -> Void)?
 
     /// Giữ bao lâu thì vào chế độ lưới.
     ///
@@ -114,6 +116,13 @@ final class DraggableView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // Nhấp đúp mở Finder, không vào vòng kéo. Phải kiểm TRƯỚC mọi thứ khác
+        // vì `mouseDown` lần thứ hai của một cú nhấp đúp vẫn có `clickCount == 2`.
+        if event.clickCount >= 2 {
+            isPressed = false
+            onDoubleClick?()
+            return
+        }
         guard let w = window else { return }
         guard let p0 = screenPoint(event) else { return }
         w.makeKey()
@@ -303,6 +312,11 @@ final class WidgetWindow {
 
     private let controls = WidgetControls()
     private var imageSize = NSSize(width: 400, height: 300)
+    /// Ảnh đang hiện, để mở trong Finder.
+    private var currentURL: URL?
+    /// Ảnh đang hiện. Giữ riêng vì `imageView.image` để trống — phần vẽ do
+    /// layer đảm nhiệm (xem `refreshImageLayer`).
+    private var currentImage: NSImage?
     private var settled = false
 
     /// Số thứ tự lần hiện ảnh. Lần mới hơn làm lần cũ mất hiệu lực — cần khi
@@ -332,8 +346,9 @@ final class WidgetWindow {
         // Vị trí thật do `layout()` đặt; ở đây chỉ cần một khung tạm cho tới lúc đó.
         let iv = NSImageView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         iv.autoresizingMask = []
-        iv.imageScaling = .scaleProportionallyUpOrDown
-        iv.imageAlignment = .alignCenter
+        // Không dùng `imageScaling` của NSImageView: nó chỉ có "vừa khung", không
+        // cắt được. Để vẽ bằng layer thì kiểm soát được cả hai, và nhất là đặt
+        // `contentsScale` đúng màn hình Retina.
         iv.wantsLayer = true
         imageView = iv
 
@@ -363,6 +378,7 @@ final class WidgetWindow {
             self.container.isHidden = false
             self.controls.isHidden = !hovering
         }
+        view.onDoubleClick = { [weak self] in self?.revealCurrentInFinder() }
 
         applyAppearance()
         overlay.setLevel(activeLevel)
@@ -394,6 +410,25 @@ final class WidgetWindow {
         imageView.layer?.cornerRadius = r
         imageView.layer?.cornerCurve = .continuous
         imageView.layer?.masksToBounds = true
+    }
+
+    /// Đổ ảnh vào layer theo chế độ điền đã chọn.
+    ///
+    /// `contentsGravity` là lúc này quyết định mọi thứ:
+    ///   - `.resizeAspect`      vừa khung, giữ nguyên tỉ lệ
+    ///   - `.resizeAspectFill`  phủ kín, cắt bớt phần thừa
+    ///
+    /// Phải đặt `contentsScale` bằng hệ số thật của màn hình, nếu không ảnh
+    /// sẽ mờ trên Retina — đây là lý do không dùng `NSImageView.imageScaling`.
+    private func refreshImageLayer() {
+        guard let img = currentImage,
+              let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else { return }
+        let l = imageView.layer
+        l?.contents = cg
+        l?.contentsGravity = settings.fillMode == .fill ? .resizeAspectFill : .resizeAspect
+        l?.contentsScale = currentScreen()?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor ?? 2
     }
 
     private func lift(_ scale: CGFloat) {
@@ -506,6 +541,13 @@ final class WidgetWindow {
         controls.onTogglePin = onPin
     }
 
+    /// Mở ảnh gốc trong Finder, tô sáng file đó.
+    func revealCurrentInFinder() {
+        guard let u = currentURL,
+              FileManager.default.fileExists(atPath: u.path) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([u])
+    }
+
     // MARK: - Hiển thị
 
     func show(_ url: URL, evenIfBusy: Bool = false) {
@@ -532,7 +574,7 @@ final class WidgetWindow {
         // Ảnh còn trong RAM: đổi tức thì, không cần bố trí hẹn giờ.
         // Đây là đường đi của nút ‹ › và của mọi lần quay lại ảnh vừa xem.
         if let img = ImageStore.inMemory(url, maxPixel: displayMaxPixel) {
-            applyImage(img, size: target)
+            applyImage(img, url: url, size: target)
             return
         }
 
@@ -546,18 +588,20 @@ final class WidgetWindow {
         let pixel = displayMaxPixel
         ImageStore.load(url, maxPixel: pixel) { [weak self] img in
             guard let self, let img, self.showToken == token, !self.busy else { return }
-            self.applyImage(img, size: target)
+            self.applyImage(img, url: url, size: target)
         }
     }
 
     /// Đặt ảnh vào khung: đổi ảnh và đổi kích thước cửa sổ trong một lần vẽ.
     /// Tách riêng là để ảnh không bao giờ bị thấy ở khung kia.
-    private func applyImage(_ img: NSImage, size target: NSSize) {
+    private func applyImage(_ img: NSImage, url: URL, size target: NSSize) {
         let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
 
-        imageView.image = img
+        currentImage = img
+        currentURL = url
         imageSize = target
         applyAppearance()
+        refreshImageLayer()
         layout()
         window.alphaValue = settings.opacity
 
@@ -577,6 +621,7 @@ final class WidgetWindow {
 
     func applyAll() {
         applyAppearance()
+        refreshImageLayer()
         layout()
         window.alphaValue = settings.opacity
     }

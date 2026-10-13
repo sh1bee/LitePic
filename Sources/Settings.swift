@@ -36,6 +36,19 @@ enum LevelMode: Int, CaseIterable {
     }
 }
 
+/// Cách ảnh lấp đầy khung.
+enum FillMode: Int, CaseIterable {
+    case fit    // vừa khung, giữ nguyên tỉ lệ, có nền trống 2 bên
+    case fill   // cắt bớt viền để tràn kín khung
+
+    var title: String {
+        switch self {
+        case .fit:  return "Vừa khung (giữ tỉ lệ)"
+        case .fill: return "Cắt đầy khung"
+        }
+    }
+}
+
 /// Toàn bộ tuỳ chọn nằm trong UserDefaults — không file cấu hình phức tạp.
 final class Settings {
     static let shared = Settings()
@@ -55,6 +68,7 @@ final class Settings {
         static let interactive   = "interactive"
         static let snapToGrid   = "snapToGrid"
         static let renderScale  = "renderScale"
+        static let fillMode     = "fillMode"
         static let levelMode    = "levelMode"
         static let changeOnWake = "changeOnWake"
         static let pinned     = "pinnedURL"
@@ -153,6 +167,13 @@ final class Settings {
     var renderScale: CGFloat {
         get { d.object(forKey: K.renderScale) == nil ? 2 : CGFloat(d.double(forKey: K.renderScale)) }
         set { d.set(Double(newValue), forKey: K.renderScale) }
+    }
+
+    /// Chỉ có tác dụng ở chế độ *Kích thước cứng* — hai chế độ còn lại tính
+    /// kích thước cửa sổ theo đúng tỉ lệ ảnh nên không bao giờ thừa hay thiếu.
+    var fillMode: FillMode {
+        get { FillMode(rawValue: d.integer(forKey: K.fillMode)) ?? .fit }
+        set { d.set(newValue.rawValue, forKey: K.fillMode) }
     }
 
     var levelMode: LevelMode {

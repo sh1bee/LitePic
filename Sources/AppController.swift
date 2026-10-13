@@ -129,6 +129,17 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         m.addItem(submenu("Chất lượng", qualityMenu))
 
+        // Chỉ có tác dụng ở chế độ *Kích thước cứng* — hai chế độ còn lại tính
+        // cửa sổ theo đúng tỉ lệ ảnh nên không bao giờ thừa hay thiếu chỗ.
+        if settings.sizeMode == .fixed {
+            let fillMenu = NSMenu()
+            for f in FillMode.allCases {
+                add(fillMenu, f.title, #selector(pickFillMode), tag: f.rawValue,
+                    state: settings.fillMode == f ? .on : .off)
+            }
+            m.addItem(submenu("Cách điền ảnh", fillMenu))
+        }
+
         let opacityMenu = NSMenu()
         for pct in Self.opacityChoices {
             add(opacityMenu, "\(pct)%", #selector(pickOpacity), tag: pct,
@@ -156,6 +167,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             #selector(togglePause), state: paused ? .on : .off)
 
         m.addItem(.separator())
+        add(m, "Mở ảnh trong Finder", #selector(revealCurrent))
         add(m, "Xoá cache ảnh", #selector(clearImageCache))
         m.addItem(.separator())
         add(m, "Tự chạy khi đăng nhập", #selector(toggleLaunchAtLogin),
@@ -423,6 +435,16 @@ final class AppController: NSObject, NSApplicationDelegate {
             settings.height = d["h"] ?? 480
         }
         applyAppearance()
+    }
+
+    @objc private func pickFillMode(_ sender: NSMenuItem) {
+        settings.fillMode = FillMode(rawValue: sender.tag) ?? .fit
+        widget.applyAll()
+        rebuildMenu()
+    }
+
+    @objc private func revealCurrent(_ sender: Any?) {
+        widget.revealCurrentInFinder()
     }
 
     @objc private func pickOpacity(_ sender: NSMenuItem) {

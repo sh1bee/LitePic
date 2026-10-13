@@ -181,3 +181,50 @@ khi chỉ là hàng đợi bị bẩn. Cần `drain` hàng đợi trước mỗi
 `folders` trong tuỳ chọn; `Bookmarks.save([])` lại không xoá giá trị cũ. Hệ quả:
 bấm "Bỏ thư mục" rồi mở lại app thì app vẫn tự giải mã 24 ảnh cũ. Đã sửa: `folders`
 là nguồn sự thật, bookmark chỉ dùng để *sửa đường dẫn* khi thư mục bị di chuyển.
+---
+
+## 6. Vấn đề 6 (2026-10-13): widget biến mất khi giữ chuột để bật lưới
+
+**Triệu chứng.** Bấm giữ widget → lưới hiện → widget trống trơn. Cửa sổ vẫn còn,
+vẫn bấm/chuột phải được, `CGWindowList` báo `onScreen=1, alpha=1.00`. Chỉ tới lúc
+app **đổi ảnh** (bộ đếm 15–30s) nó mới hiện lại.
+
+**Đường đi đã sai, ghi lại cho đỡ mất công:**
+
+* Nghi "overlay ở tầng +1 che widget" → đo thật: overlay trong suốt, không che gì.
+* Nghi `lift()` đặt transform 3D làm hỏng lớp → đo thật: nội dung vẫn hiện.
+* Đo bằng `screencapture -R` vùng widget → dễ đo nhầm cửa sổ của chính mình.
+  Bắt buộc `precondition(widget.window.isVisible)` trước khi đo, vì `init()` gọi
+  `orderOut(nil)` và cửa sổ chưa được đưa lên thì phép đo thu về nền.
+* Chụp toàn màn hình rồi crop — vô dụng nếu cửa sổ khác của ta che đúng chỗ.
+
+**Phép đo bẻ gãy.** Ở tấm ảnh "sau khi thả" widget hiện lại và tôi tưởng lỗi tự
+hết. Hoá ra tấm đó **trùng đúng thời điểm app đổi ảnh** — một sự trùng hợp do
+đặt chu kỳ đổi ảnh là 15s. Đây là dạng bẫy thứ tư khi đo: **trạng thái "đã hồi
+phục" có thể chỉ là tai nạn thời gian**, không phải hành vi của lỗi. Phải nhìn
+cả *trước* khi tạo ra nó.
+
+**Nguyên nhân thật.** Ảnh được đổ bằng cách gán `layer.contents` **tay** lên
+`NSImageView`. Ô nhớ đó do AppKit sở hữu: mỗi lần AppKit vẽ lại view, `draw()` của
+`NSImageView` chạy với không có `image` và **xoá sạch `contents`**. Mà đổi
+transform của lớp cha thì đủ để kích hoạt lần vẽ đó — và `lift()` làm đúng việc
+đó ngay khoảnh khắc bấm giữ.
+
+**Đo đúng bằng `contents`, không đo pixel.** Pixel chỉ nói "có/không"; `contents`
+nói *tại sao*. Cô lập từng bước cho thấy `onHint` (chính là `lift(1.04)`) là bước
+đầu tiên làm mất ảnh — **trước cả khi lưới hiện**.
+
+**Bài học về cách thử nghiệm.** Tôi thử ba kỹ thuật đặt transform và kết luận
+"CABasicAnimation là cách an toàn". Sai: cả ba đều làm mất ảnh, nhưng vì thứ tự
+thử làm kết quả sai (sau khi ảnh đã mất thì `setContents` hồi lại được). Chỉ khi
+đổi **kiến trúc** mới thấy cả bốn cách đều "CON" — đó mới là bằng chứng sửa đúng
+chỗ. Đừng kết luận từ phép thử có tham số bị nhiễm.
+
+**Cách sửa.** Bỏ hẳn việc đặt `contents` tay: thay `NSImageView` bằng `ImageCanvas`
+— `NSView` thường tự vẽ ảnh trong `draw(_:)`. AppKit vẽ lại bao nhiêu lần cũng ra
+đúng ảnh. Việc cắt ảnh (vừa khung / phủ kín) chuyển sang tính trong `draw`, và phần
+Retina do AppKit lo thay cho `contentsScale` đặt tay.
+
+**Còn sót.** `app.run()` không được bọc trong `asyncAfter` (deadless vòng tròn:
+`asyncAfter` cần run loop mà run loop chờ `app.run()`), và `Thread.sleep` trên main
+thread chặn việc giải mã ảnh nên phép đo báo "ảnh chưa nạp" một cách vô lý.

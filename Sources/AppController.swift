@@ -75,6 +75,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         let m = NSMenu()
         m.autoenablesItems = false
 
+        let levelMenu = NSMenu()
+        for mode in LevelMode.allCases {
+            add(levelMenu, mode.title, #selector(pickLevel), tag: mode.rawValue,
+                state: settings.levelMode == mode ? .on : .off)
+        }
+        m.addItem(submenu("Hiển thị", levelMenu))
+        m.addItem(.separator())
+
         add(m, "Chọn thư mục ảnh…", #selector(chooseFolders))
         if !settings.folderPaths.isEmpty {
             add(m, "Bỏ thư mục (\(images.count) ảnh)", #selector(clearFolders))
@@ -314,6 +322,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         settings.renderScale = CGFloat(sender.tag)
         rebuildMenu()
         if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+    }
+
+    @objc private func pickLevel(_ sender: NSMenuItem) {
+        settings.levelMode = LevelMode(rawValue: sender.tag) ?? .floating
+        widget.applyLevel()
+        rebuildMenu()
     }
 
     @objc private func toggleSnap() {

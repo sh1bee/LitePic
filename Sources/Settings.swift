@@ -15,6 +15,24 @@ enum SizeMode: Int, CaseIterable {
     }
 }
 
+/// Tầng hiển thị của widget.
+///
+/// Vì sao cần: widget đặt ở tầng `desktop + 20` thì **luôn nằm dưới mọi cửa sổ
+/// app** (tầng 0). Chỉ cần một cửa sổ trình duyệt phủ qua vùng đó là mọi cú
+/// click rơi vào cửa sổ kia, widget không bao giờ nhận được sự kiện chuột.
+/// Đây là hành vi đúng như widget macOS, nhưng khó chịu khi màn hình bị phủ kín.
+enum LevelMode: Int, CaseIterable {
+    case desktop   // trên wallpaper, dưới cửa sổ app (giống widget macOS)
+    case floating  // nổi trên cửa sổ app — luôn bấm/kéo được
+
+    var title: String {
+        switch self {
+        case .desktop:  return "Trên wallpaper (dưới app)"
+        case .floating: return "Luôn nổi (dễ bấm)"
+        }
+    }
+}
+
 /// Toàn bộ tuỳ chọn nằm trong UserDefaults — không file cấu hình phức tạp.
 final class Settings {
     static let shared = Settings()
@@ -35,6 +53,7 @@ final class Settings {
         static let snapToGrid   = "snapToGrid"
         static let renderScale  = "renderScale"
         static let cornerRadius = "cornerRadius"
+        static let levelMode    = "levelMode"
         static let posX          = "posX"
         static let posY          = "posY"
     }
@@ -119,6 +138,11 @@ final class Settings {
     var cornerRadius: CGFloat {
         get { d.object(forKey: K.cornerRadius) == nil ? 20 : CGFloat(d.double(forKey: K.cornerRadius)) }
         set { d.set(Double(newValue), forKey: K.cornerRadius) }
+    }
+
+    var levelMode: LevelMode {
+        get { LevelMode(rawValue: d.integer(forKey: K.levelMode)) ?? .floating }
+        set { d.set(newValue.rawValue, forKey: K.levelMode) }
     }
 
     var savedOrigin: NSPoint? {

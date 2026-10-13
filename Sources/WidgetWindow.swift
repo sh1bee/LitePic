@@ -30,6 +30,9 @@ final class DraggableView: NSView {
     /// Menu hiện khi bấm chuột phải — AppController gắn vào sau init.
     var contextMenu: NSMenu?
 
+    /// Tạm cho kiểm thử quan sát callback (gỡ khi xong).
+    struct debugHooks { static var onLongPress: (() -> Void)? }
+
     static let holdDuration: TimeInterval = 2.0
     private static let hintDelay: TimeInterval = 0.45
     private static let moveThreshold: CGFloat = 3
@@ -97,8 +100,22 @@ final class DraggableView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard let w = window, let p0 = screenPoint(event) else { return }
+        // Đường đi THẬT của chuột. Test cũ gọi thẳng hàm này nên bỏ qua hết
+        // phần này — log lại để biết sự kiện có thật sự tới nơi hay không.
+        Diag.log("mouseDown TOI: evtWin=\(event.windowNumber) viewWin=\(window?.windowNumber ?? -1) loc=\(event.locationInWindow)")
+
+        guard let w = window else {
+            Diag.log("  -> THOAT: view khong con window")
+            return
+        }
+        Diag.describe(w, "  mouseDown")
+
+        guard let p0 = screenPoint(event) else {
+            Diag.log("  -> THOAT: khong lay duoc toa do")
+            return
+        }
         w.makeKey()
+        Diag.log("  makeKey xong, isKey=\(w.isKeyWindow)")
         grabOffset = NSPoint(x: p0.x - w.frame.origin.x, y: p0.y - w.frame.origin.y)
 
         isPressed = true
@@ -134,12 +151,19 @@ final class DraggableView: NSView {
                                           dequeue: true) else {
                 if !moved {
                     if !hinted { hinted = true; onHoldTick?(); continue }
-                    if !armed { armed = true; onLongPress?(); continue }
+                    if !armed {
+                        armed = true
+                        Diag.log("GIU DU 2s -> bat che do luoi")
+                        debugHooks.onLongPress?()
+                        onLongPress?()
+                        continue
+                    }
                 }
                 continue
             }
 
             if e.type == .leftMouseUp {
+                Diag.log("mouseUp nhan: moved=\(moved) armed=\(armed) hinted=\(hinted)")
                 if moved {
                     onDrop?(armed ? .snap : .free)
                 } else if armed {
@@ -189,6 +213,9 @@ final class GridOverlay {
 
     var isVisible: Bool { window.isVisible }
 
+    /// Bám theo tầng của widget + 1 để lưới luôn nằm ngay trên nó.
+    func setLevel(_ base: NSWindow.Level) { window.level = base + 1 }
+
     func show(slots: [NSPoint], size: NSSize, corner: CGFloat, on screen: NSScreen) {
         for v in host.subviews { v.removeFromSuperview() }
         slotViews = slots.map { origin in
@@ -204,8 +231,11 @@ final class GridOverlay {
             host.addSubview(v)
             return v
         }
-        window.setFrame(screen.frame, display: false)
+        window.setFrame(screen.frame, display: true)
         window.orderFrontRegardless()
+        // `display: true` trên đã đủ, nhưng `orderFrontRegardless` không bảo đảm
+        // vẽ lại khi cửa sổ đã hiện sẵn từ trước. Gọi display rõ ràng để chắc.
+        window.displayIfNeeded()
     }
 
     func highlight(index: Int?) {
@@ -234,9 +264,17 @@ final class WidgetWindow {
         rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 21))
 
     private static let pad: CGFloat = 20
-    private static let widgetLevel: NSWindow.Level = {
+    private static let desktopLevel: NSWindow.Level = {
         NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 20)
     }()
+
+    /// Tầng thực tế đang dùng — `floating` cao hơn cửa sổ app (0) nên luôn bấm được.
+    private var activeLevel: NSWindow.Level {
+        switch settings.levelMode {
+        case .desktop:  return Self.desktopLevel
+        case .floating: return .floating
+        }
+    }
 
     private var imageSize = NSSize(width: 400, height: 300)
     private var settled = false
@@ -269,7 +307,7 @@ final class WidgetWindow {
         w.isOpaque = false
         w.backgroundColor = .clear
         w.hasShadow = false
-        w.level = Self.widgetLevel
+        w.level = activeLevel
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         w.hidesOnDeactivate = false
         w.alphaValue = settings.opacity
@@ -284,6 +322,7 @@ final class WidgetWindow {
         view.onLongPress = { [weak self] in self?.armSnapMode() }
 
         applyAppearance()
+        overlay.setLevel(activeLevel)
         restorePosition()
         layout()
     }
@@ -326,6 +365,16 @@ final class WidgetWindow {
     }
 
     func applyOpacity() { window.alphaValue = settings.opacity }
+
+    /// Đổi tầng ngay khi người dùng đổi lựa chọn trong menu.
+    func applyLevel() {
+        window.level = activeLevel
+        overlay.setLevel(activeLevel)
+        // `floating` cao hơn hẳn tầng desktop — cần orderFront lại mới nhận
+        // đúng thứ tự vẽ sau khi đổi tầng.
+        window.orderFrontRegardless()
+        Diag.describe(window, "  doi tang")
+    }
 
     private func layout() {
         window.setContentSize(NSSize(width: imageSize.width + Self.pad * 2,

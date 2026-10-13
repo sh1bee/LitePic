@@ -212,8 +212,13 @@ final class AppController: NSObject, NSApplicationDelegate {
         lastIndex = -1
         rebuildMenu()
         scheduleTimer()
+        pruneCache()
         if !images.isEmpty {
-            ImageStore.prewarm(images, maxPixel: widget.displayMaxPixel)
+            // KHÔNG giải mã hết loạt ảnh lúc mở. Bản cũ làm vậy và đo được:
+            // CPU +1.25s, RAM 24 MB -> 52 MB, trong khi phần lớn ảnh đó không
+            // bao giờ được xem. Ảnh giờ được giải mã khi thật sự cần, ngoài luồng
+            // chính, và nhớ lại trong RAM cho lần xem sau.
+            ImageStore.clearMemory()
             advance()
             // Cửa sổ khác đang che widget? Tự nâng lên tầng nổi để bấm được.
             if widget.autoLiftIfOccluded() { rebuildMenu() }
@@ -335,7 +340,16 @@ final class AppController: NSObject, NSApplicationDelegate {
         widget.applyAll()
         // Đổi cỡ từ menu là chủ động của người dùng nên áp dụng ngay kể cả khi bận.
         if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+        pruneCache()
         rebuildMenu()
+    }
+
+    /// Dọn cache của các mức kích thước không còn dùng.
+    ///
+    /// Mỗi mức là một bộ file riêng, nên đổi cỡ widget hay hạ chất lượng sẽ để lại
+    /// mức cũ mãi mãi. Gọi ở mọi lần đổi kích thước hiển thị.
+    private func pruneCache() {
+        ImageStore.pruneCache(keepPixels: ImageStore.pixelBucket(for: widget.displayMaxPixel))
     }
 
     // MARK: - Hành động menu
@@ -384,6 +398,7 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func pickRenderScale(_ sender: NSMenuItem) {
         settings.renderScale = CGFloat(sender.tag)
+        pruneCache()
         rebuildMenu()
         if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
     }

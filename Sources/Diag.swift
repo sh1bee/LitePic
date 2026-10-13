@@ -16,9 +16,14 @@ enum Diag {
 
     static var enabled: Bool = UserDefaults.standard.bool(forKey: "diag")
 
-    static func log(_ s: String) {
+    /// `s` là autoclosure: khi tắt log, biểu thức nội tuyến KHÔNG được dựng.
+    ///
+    /// Quan trọng về hiệu năng: Swift dựng sẵn đối số trước khi gọi hàm. Với
+    /// `log("chuột xuống tại \(x)")`, chuỗi được cấp phát và nối lại ở MỌI lần
+    /// bấm chuột kể cả khi log đang tắt — thứ vốn không nên tốn một byte heap.
+    static func log(_ s: @autoclosure () -> String) {
         guard enabled else { return }
-        let line = "\(Date().timeIntervalSince1970)  \(s)\n"
+        let line = "\(Date().timeIntervalSince1970)  \(s())\n"
         if let fh = FileHandle(forWritingAtPath: path) {
             fh.seekToEndOfFile()
             fh.write(line.data(using: .utf8)!)

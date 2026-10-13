@@ -221,6 +221,8 @@ final class GridOverlay {
     private let window: NSWindow
     private let host = NSView()
     private var slotViews: [NSView] = []
+    /// Ô đang sáng — để lần tới chỉ vẽ lại đúng ô vừa bỏ sáng và ô vừa sáng.
+    private var highlighted: Int?
 
     init(level: NSWindow.Level) {
         window = NSWindow(contentRect: .zero, styleMask: [.borderless],
@@ -242,6 +244,7 @@ final class GridOverlay {
 
     func show(slots: [NSPoint], size: NSSize, corner: CGFloat, on screen: NSScreen) {
         for v in host.subviews { v.removeFromSuperview() }
+        highlighted = nil
         slotViews = slots.map { origin in
             let v = NSView(frame: NSRect(x: origin.x - screen.frame.minX,
                                          y: origin.y - screen.frame.minY,
@@ -262,20 +265,37 @@ final class GridOverlay {
         window.displayIfNeeded()
     }
 
+    /// Tô sáng ô đang ngắm.
+    ///
+    /// Chỉ chạm vào tối đa 2 lớp thay vì cả 8. Bản cũ lặp qua toàn bộ ô và đặt
+    /// lại `borderWidth`/`borderColor`/`backgroundColor` cho từng ô — mỗi lần
+    /// đặt là một lần lớp phải vẽ lại. Hàm này được gọi theo MỌI sự kiện rê
+    /// chuột trong lúc kéo chế độ lưới, tức hàng trăm lần mỗi lần kéo.
     func highlight(index: Int?) {
-        for (i, v) in slotViews.enumerated() {
-            let on = (i == index)
-            v.layer?.borderWidth = on ? 2.5 : 1.5
-            v.layer?.borderColor = on
-                ? NSColor.controlAccentColor.cgColor
-                : NSColor.white.withAlphaComponent(0.5).cgColor
-            v.layer?.backgroundColor = on
-                ? NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
-                : NSColor.white.withAlphaComponent(0.07).cgColor
+        if let was = highlighted, was != index {
+            paint(slotViews[was], on: false)
         }
+        if let now = index, slotViews.indices.contains(now) {
+            paint(slotViews[now], on: true)
+        }
+        highlighted = index
     }
 
-    func hide() { window.orderOut(nil) }
+    private func paint(_ v: NSView, on: Bool) {
+        guard let l = v.layer else { return }
+        l.borderWidth = on ? 2.5 : 1.5
+        l.borderColor = on
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.white.withAlphaComponent(0.5).cgColor
+        l.backgroundColor = on
+            ? NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
+            : NSColor.white.withAlphaComponent(0.07).cgColor
+    }
+
+    func hide() {
+        highlighted = nil
+        window.orderOut(nil)
+    }
 }
 
 /// Cửa sổ widget: bo tròn, có bóng, kéo tự do hoặc giữ 2s để khe lưới.
@@ -303,6 +323,11 @@ final class WidgetWindow {
     private let controls = WidgetControls()
     private var imageSize = NSSize(width: 400, height: 300)
     private var settled = false
+
+    /// Số thứ tự lần hiện ảnh. Lần mới hơn làm lần cũ mất hiệu lực — cần khi
+    /// người dùng bấm ‹ › liên tục trong lúc bộ giải mã còn đang chạy, nếu không
+    /// ảnh sẽ về đúng thứ tự ngược với nút đã bấm.
+    private var showToken = 0
 
     /// Khoảng trống chừa quanh ảnh cho khung hiện tại.
     private var frameInset: CGFloat { settings.frameStyle.inset }
@@ -439,6 +464,21 @@ final class WidgetWindow {
                                  width: imageSize.width, height: imageSize.height)
         settings.frameStyle.decorate(in: container, imageRect: imageView.frame)
         layoutControls()
+        updateShadowPath()
+    }
+
+    /// Cho biết chính xác hình dạng nào đổ bóng.
+    ///
+    /// Không có dòng này, CoreAnimation phải tự dựng bóng: rasterize nội dung
+    /// lớp thành ảnh rồi áp bộ lọc Gaussian mỗi khi khung đổi — tức là MỖI
+    /// lần kéo widget, vì kéo là đổi khung. Đo thì riêng bước dựng bóng này
+    /// nặng hơn cả bước vẽ ảnh. Chỉ định `shadowPath` thì nó dùng luôn đường
+    /// này, không phải làm gì.
+    private func updateShadowPath() {
+        guard let l = container.layer, l.shadowOpacity > 0 else { return }
+        let r = settings.frameStyle.imageCorner
+        l.shadowPath = CGPath(roundedRect: container.bounds,
+                              cornerWidth: r, cornerHeight: r, transform: nil)
     }
 
     /// Đặt cụm nút trong góc trên phải của vùng ảnh, chồm lên viền.
@@ -488,10 +528,32 @@ final class WidgetWindow {
                 : NSSize(width: (m * aspect).rounded(), height: m)
         }
 
-        guard let img = ImageStore.thumbnail(of: url, maxPixel: displayMaxPixel) else { return }
+        // Ảnh còn trong RAM: đổi tức thì, không cần bố trí hẹn giờ.
+        // Đây là đường đi của nút ‹ › và của mọi lần quay lại ảnh vừa xem.
+        if let img = ImageStore.inMemory(url, maxPixel: displayMaxPixel) {
+            applyImage(img, size: target)
+            return
+        }
+
+        // Chưa có trong RAM: giải mã ngoài luồng chính.
+        //
+        // Trước đây việc này chạy thẳng trên luồng chính. Ảnh gốc 3840×2160 mất
+        // 0.33s để giải mã — nghĩa là widget đứng hình gần nửa giây. Giờ luồng
+        // chính giữ nguyên và ảnh về sau, không về trước.
+        showToken += 1
+        let token = showToken
+        let pixel = displayMaxPixel
+        ImageStore.load(url, maxPixel: pixel) { [weak self] img in
+            guard let self, let img, self.showToken == token, !self.busy else { return }
+            self.applyImage(img, size: target)
+        }
+    }
+
+    /// Đặt ảnh vào khung: đổi ảnh và đổi kích thước cửa sổ trong một lần vẽ.
+    /// Tách riêng là để ảnh không bao giờ bị thấy ở khung kia.
+    private func applyImage(_ img: NSImage, size target: NSSize) {
         let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
 
-        imageView.image = nil
         imageView.image = img
         imageSize = target
         applyAppearance()

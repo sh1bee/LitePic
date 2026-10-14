@@ -27,6 +27,18 @@ final class DragSession {
     static let settleDuration: TimeInterval = 1.2
     /// Dịch chuyển bao nhiêu thì coi là "đã kéo" (điểm).
     private static let moveThreshold: CGFloat = 3
+    /// Bao lâu thức dậy một lần khi vòng lặp không có việc gì để làm.
+    private static let watchdogTick: TimeInterval = 0.3
+    /// Mất focus liên tục bao lâu thì coi như lần kéo bị bỏ rơi.
+    private static let lostFocusGrace: TimeInterval = 1.0
+    /// Không có sự kiện nào trong bao lâu thì thả bất kể focus.
+    ///
+    /// Khoảng này cố tình dài: người dùng cầm widget lên suy nghĩ vài giây là
+    /// chuyện thường (đó là lý do có `settleDuration`), còn 30 giây cầm yên
+    /// không nhấn nữa thì không phải tương tác thật. Nó bịt nốt lỗ hổng còn
+    /// lại: mất focus thì đã xử lý, còn `mouseUp` thất lạc khi app vẫn active
+    /// thì chỉ có đồng hồ này bắt được.
+    private static let hungTimeout: TimeInterval = 30
 
     /// Kéo tự do — di chuyển đến đâu đặt bấy nhiêu.
     var onDrag: ((NSPoint) -> Void)?
@@ -68,6 +80,9 @@ final class DragSession {
         var moved = false
         var lastMove = Date()
         let t0 = Date()
+        /// Lúc bắt đầu có một khoảng lặng dài bất thường — dùng để đòi lại
+        /// quyền kiểm soát nếu app đã mất focus.
+        var silentSince: Date? = nil
 
         // Mọi đường thoát đều đi qua đây: trả cursor, hạ cờ.
         defer {
@@ -88,6 +103,10 @@ final class DragSession {
                 else if !armed { deadline = t0.addingTimeInterval(Self.holdDuration) }
             } else if !armed {
                 deadline = lastMove.addingTimeInterval(Self.settleDuration)
+            } else {
+                // Đã kéo và đã bật lưới: không còn mốc hẹn nào, nên `nextEvent`
+                // sẽ chặn vô hạn đợi `mouseUp`. Đó là chỗ dễ kẹt — xem bên dưới.
+                deadline = Date().addingTimeInterval(Self.watchdogTick)
             }
 
             guard let e = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
@@ -102,9 +121,37 @@ final class DragSession {
                         armed = true
                         onArmed?()
                     }
+                    continue
+                }
+                // Chó canh: đã bật lưới mà không nhận được sự kiện nào.
+                //
+                // Vì sao cần: `begin()` chỉ ra khỏi vòng lặp khi nhận
+                // `.leftMouseUp`. Đo được trước khi sửa: thả chuột "cứu tinh"
+                // post vào giây thứ 6 thì vòng lặp mới ra; không có nó thì treo
+                // — `isDragging` kẹt `true`, widget dính theo con trỏ, và con
+                // trỏ bàn tay nắm kẹt trong ngăn xếp đến hết phiên.
+                //
+                // Cần nói rõ điều KHÔNG phải nguyên nhân: trên macOS, `mouseUp`
+                // không bị mất khi app mất focus — app đã nhận `mouseDown` thì giữ
+                // mouse grab, nên Cmd+Tab rồi thả chuột vẫn thả bình thường. Nên
+                // kịch bản "mất focus là kẹt" không thành. Cái thật sự treo là khi
+                // sự kiện bị mất theo kiểu khác (màn hình ngủ giữa chừng chẳng
+                // hạn), và nó không phản ứng gì với Cmd+Tab.
+                //
+                // Vì vậy chỉ thả khi **mất focus** — lúc đang kéo bình thường
+                // (app luôn active vì `makeKey()` ở trên) thì không bao giờ bị
+                // đụng, và người dùng cứ cầm widget lên suy nghĩ bao lâu cũng được.
+                if silentSince == nil { silentSince = Date() }
+                else if let s = silentSince {
+                    let quiet = Date().timeIntervalSince(s)
+                    if quiet > Self.hungTimeout || (!NSApp.isActive && quiet > Self.lostFocusGrace) {
+                        onDrop?(.free)  // coi nhu bo roi: tha tu do, khong khe
+                        return
+                    }
                 }
                 continue
             }
+            silentSince = nil
 
             if e.type == .leftMouseUp {
                 if moved {

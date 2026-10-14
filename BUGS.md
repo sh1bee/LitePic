@@ -471,3 +471,101 @@ Thêm một: `UIAlert`/thông báo crash của hệ thống không cần — `op
 chưa kịp hiện. Tôi **không** ghi nhận là đã tái hiện được chỗ đó. Bằng chứng cho
 nhánh `images[-1]` đến từ crash *thật* ở `showPinnedIfNeeded()` — cùng nguyên nhân,
 cùng biểu thức, đã tái hiện trên app thật và xác nhận bằng báo cáo crash.
+
+---
+
+# Vòng 3 — năm điểm rà soá (đã sửa, có phép đo)
+
+Kết quả: **3 đúng hoàn toàn, 1 đúng phần nguyên nhân nhưng sai phần cơ chế, 1
+đúng nhưng hậu quả thật sự thấp hơn mô tả.** Đều đã sửa.
+
+## 13. Vòng lặp kéo chỉ thoát khi nhận `.leftMouseUp`
+
+**Phần đúng.** `begin()` có `while true`, chỉ ra khỏi vòng lặp ở nhánh
+`e.type == .leftMouseUp`. Không có đường thoát nào khác.
+
+**Phần sai: kịch bản "mất focus là mất `mouseUp`".** Trên macOS, app đã nhận
+`mouseDown` thì **giữ mouse grab** — kéo và thả vẫn về app đó dù Cmd+Tab, dù
+Mission Control. Nên kịch bản Zalo hiện lên rồi thả chuột **không gây kẹt**.
+
+**Phần đúng và đáng sửa: nếu `mouseUp` thất lạc thì treo vô hạn.** Đo trước khi
+sửa — thả chuột "cứu tinh" post vào giây thứ 6 thì vòng lặp mới ra (6.30s); không
+có nó thì treo. Hậu quả: `isDragging` kẹt `true`, widget dính theo con trỏ, và
+con trỏ bàn tay nắm kẹt trong ngăn xếp đến hết phiên.
+
+**Cách sửa — chó canh, và cố tình hẹp.** Khi đã bật lưới thì hẹn mốc 0.3s thay vì
+chặn vô hạn; mỗi lần tỉnh dậy kiểm tra hai điều:
+
+| điều kiện | ngưỡng | vì sao |
+|---|---|---|
+| mất focus liên tục | 1.0s | đúng kịch bản "kéo bị bỏ rơi" |
+| không có sự kiện nào | 30s | bịt lỗ hổng còn lại khi app **vẫn** active |
+
+Hai ngưỡng phải dài: người dùng cầm widget lên suy nghĩ vài giây là chuyện thường
+(đó là lý do có `settleDuration`), nên không thể chặn theo thời gian im lặng thuần.
+
+**Đo cả hai chiều** (bổ sung vào `Tests/main.swift` mục I):
+
+```
+im lang, khong co su kien nao   -> 2.90s   (truoc khi sua: 6.30s, chi do cuu tinh)
+keo that 4s, vuot qua nguong   -> 4.01s   (khong bi cat ngao)
+```
+
+## 14. "Bỏ thư mục" xong ảnh vẫn nằm vĩnh viễn
+
+Xác nhận bằng đọc: `clearFolders()` xoá `images`, dừng timer, dựng lại menu — và
+**không bao giờ ra lệnh cho `WidgetWindow`**. Danh sách rỗng nên không còn gì đổi
+ảnh, timer đã tắt → tấm ảnh cuối nằm đó mãi mãi.
+
+Chỉ `orderOut` thì chưa đủ: hai `ImageCanvas` vẫn giữ `NSImage` cũ. Thêm
+`WidgetWindow.clear()` xoá cả hai lớp + ẩn lưới + ẩn nút + ẩn cửa sổ.
+Hồi quy ở mục J: trước `clear()` có ảnh và cửa sổ hiện, sau đó cả hai đều không.
+
+## 15. Đua luồng trên đĩa cache
+
+`clearCache()` xoá thư mục cache **trên luồng gọi** (main, từ menu), trong khi
+`writeCache` ghi vào đó trên `decodeQueue`. Đây là hàng đợi nối tiếp, nên chỉ việc
+đưa thao tác xoá vào cùng hàng đợi là hết đường tranh chấp: việc dọn luôn nằm
+**sau** mọi việc giải mã đang dở.
+
+`pruneCache()` cũng xoá file nên chuyển theo (`pruneCacheNow` chạy trong hàng đợi).
+
+Hồi quy ở mục K: bắn 12 lượt nạp xen kẽ 4 lần xoá cache, rồi kiểm tra thư mục
+cache còn nguyên.
+
+## 16. Observer closure không tự giỡ
+
+Đúng: `addObserver(forName:...)` trả về `NSObjectProtocol` **không có gì tự gỡ nó**.
+
+Nhưng cần nói đúng mức độ: hiện tại **chưa rò gì** — `AppController` là singleton
+sống suốt đời app và `watchScreenState()` chỉ gọi **một** lần. Đây là lỗi âm ỉ
+(hôm nay gọi một lần, ngày sau gọi hai lần khi tái cấu trúc thì nhân lên mà
+không có gì báo). Giữ `observerTokens` và gỡ trong `deinit` — gần như miễn phí.
+
+## 17. Con trỏ: bỏ `push`/`pop` tay, chuyển sang `addCursorRect`
+
+Đúng, và đáng làm hơn cả gợi ý: ngăn xếp con trỏ của macOS là **toàn cục cho cả
+máy**, lệch một lần là con trỏ cả hệ thống còn kẹt. `addCursorRect` không có
+đường nào để lệch vì AppKit tự trả về nguyên trạng khi ra khỏi `bounds`.
+
+Code cũ **đã có** hai lớp phòng thủ (`hoverPushed` và `popHoverCursorIfNeeded()`
+gọi lúc kết thúc kéo), nên rủi ro thấp hơn mô tả — nhưng `mouseExited` rớt là có
+thật khi cửa sổ trượt dưới con trỏ đứng yên. Đổi hẳn sang `resetCursorRects`, bỏ
+hai cờ trạng thái.
+
+---
+
+## Sai lầm ở chính phép đo của vòng này
+
+**Lần "chứng minh lỗi kẹt chuột" đầu tiên của tôi vô giá trị.** Tôi đo thời gian
+`begin()` kết thúc bằng cách bọc `pump(12)` — nên luôn ra ~12s, đo cái gì không
+liên quan. Đúng phải đo thời điểm `onEnd` chạy.
+
+**Hồi quy mục I fail một lần — và lỗi là ở test, không ở app.** Chiều (2) cho
+2.51s thay vì 4.01s. Nguyên nhân: lần thả chuột "cứu tinh" hẹn ở giây 6 của chiều
+(1) **vẫn còn treo**, và nó bay sang vòng kéo của chiều (2) để kết thúc giữa
+chừng. Chính là bẫy "event sót" đã ghi ở mục 3 — lần này sót là **timer đã hẹn**,
+chứ không phải sự kiện chuột. Sửa bằng cách cho hết giờ rồi `drainEvents()`.
+
+> **Bài học đã lặp lại lần thứ hai:** đo xong phải hỏi "phép đo này có đang đo đúng
+> thứ không" trước khi tin kết luận.

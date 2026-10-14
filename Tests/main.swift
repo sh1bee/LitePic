@@ -407,6 +407,115 @@ do {
 }
 
 // ============================================================
+print("I) Keo ma khong co mouseUp -> PHAI TU THOAT (khong kiet)")
+// ============================================================
+// Hoi quy cho loi "vong lap while true chi thoat khi nhan .leftMouseUp".
+//
+// Do duoc truoc khi sua: tha chuot "cuu tinh" post vao giay thu 6 thi vong lap
+// moi ra (6.30s); khong co no thi treo vo han — isDragging ket true, widget din
+// theo con tro, va con tro bam ket trong ngan xep den het phien.
+//
+// Canh bao chi ban khi KHONG co su kien nao VA app mat focus, nen phai kiem
+// ca hai chieu: (1) im lang thi thoat, (2) keo that 4 giay thi KHONG bi cat.
+do {
+    let (w, view) = makeWidget()
+    let p0 = NSPoint(x: w.window.frame.midX, y: w.window.frame.midY)
+    let p1 = NSPoint(x: p0.x + 40, y: p0.y - 40)
+
+    // --- chieu (1): im lang, khong co su kien nao ---
+    after(0.15) { post(ev(.leftMouseDragged, p1, w.window)) }
+    // Lan THOA TAI: neu canh bao hong, chinh su kien nay moi ket thuc vong lap.
+    after(6.0) { post(ev(.leftMouseUp, p1, w.window)) }
+    let t0 = Date()
+    view.mouseDown(with: ev(.leftMouseDown, p0, w.window))
+    let quiet = Date().timeIntervalSince(t0)
+    line(quiet < 5.5, "im lang thi vong lap tu thoat",
+         String(format: "%.2fs (khong can den mouseUp cuu tinh o 6s)", quiet))
+    line(!view.session.isDragging, "isDragging da ve false sau khi thoat")
+    w.window.close()
+    // QUAN TRONG: lan thoat tai 6s cua chieu (1) van con treo. Neu khong cho
+    // no ban, no se bay sang vong keo cua chieu (2) va lam phép do sai.
+    // (Da that: 4.0s -> 2.51s, do chinh su kien cuu tinh ket thuc vong keo.)
+    RunLoop.current.run(until: Date().addingTimeInterval(6.0))
+    drainEvents()
+
+    // --- chieu (2): keo that 4 giay, vuot qua nguong canh bao ---
+    let (w2, v2) = makeWidget()
+    let q0 = NSPoint(x: w2.window.frame.midX, y: w2.window.frame.midY)
+    final class C { var n = 0 }
+    let c = C()
+    let dragTimer = Timer(timeInterval: 0.1, repeats: true) { _ in
+        c.n += 1
+        let k = CGFloat(c.n)
+        post(ev(.leftMouseDragged, NSPoint(x: q0.x + k * 3, y: q0.y - k * 2), w2.window))
+    }
+    RunLoop.main.add(dragTimer, forMode: .common)
+    after(4.0) {
+        dragTimer.invalidate()
+        let k = CGFloat(c.n)
+        post(ev(.leftMouseUp, NSPoint(x: q0.x + k * 3, y: q0.y - k * 2), w2.window))
+    }
+    let t1 = Date()
+    v2.mouseDown(with: ev(.leftMouseDown, q0, w2.window))
+    let real = Date().timeIntervalSince(t1)
+    line(real > 3.8, "keo that 4s thi canh bao KHONG cat ngao",
+         String(format: "%.2fs", real))
+    w2.window.close()
+}
+
+// ============================================================
+print("J) Bo thu muc -> anh phai bien mat, khong phai 'bong ma'")
+// ============================================================
+do {
+    let (w, _) = makeWidget()
+    let M = { (o: Any, _ l: String) -> Any? in
+        Mirror(reflecting: o).children.first { $0.label == l }?.value }
+    let iv = M(w, "imageView") as! ImageCanvas
+    let tv = M(w, "topView") as! ImageCanvas
+    func hasImage() -> Bool { iv.image != nil || tv.image != nil }
+    let t0 = Date()
+    while !hasImage() && Date().timeIntervalSince(t0) < 8 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    }
+    line(hasImage(), "truoc khi bo thu muc co anh")
+    line(w.window.isVisible, "truoc khi bo thu muc cua so hien")
+
+    w.clear()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+    line(!hasImage(), "sau clear() khong con anh nao giu lai")
+    line(!w.window.isVisible, "sau clear() cua so da an")
+    w.window.close()
+}
+
+// ============================================================
+print("K) Xoa cache luc dang giai ma -> thu muc cache phai con nguyen")
+// ============================================================
+do {
+    let dir = makeDummyTestImage().deletingLastPathComponent()
+    let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+        .filter { $0.hasSuffix(".jpg") }.sorted().map { dir.appendingPathComponent($0) }
+    let cacheDir = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent("Library/Caches/LitePic")
+
+    // Ban nhip nhieu luot nap roi xoa cache xen ke — truoc day day la cuoc dua tren
+    // dia giua `writeCache` (tren decodeQueue) va `removeItem` (tren luong menu).
+    for i in 0..<12 {
+        ImageStore.clearMemory()
+        ImageStore.load(files[i % max(1, files.count)], maxPixel: 360) { _ in }
+        if i % 3 == 0 { ImageStore.clearCache() }
+    }
+    // Cho moi viec tren hang doi chay het.
+    let t0 = Date()
+    while Date().timeIntervalSince(t0) < 4 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    var isDir: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: cacheDir.path, isDirectory: &isDir)
+    line(exists && isDir.boolValue, "thu muc cache van con sau khi xoa rac",
+         cacheDir.path)
+}
+
+// ============================================================
 print("")
 print("Xong.")
 exit(0)

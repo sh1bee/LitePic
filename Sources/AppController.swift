@@ -81,23 +81,39 @@ final class AppController: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    /// Token của các observer closure. PHẢI giữ lại.
+    ///
+    /// `addObserver(forName:object:queue:using:)` trả về một `NSObjectProtocol`
+    /// mà **không có gì tự gỡ nó** — closure sống mãi cùng trung tâm thông báo,
+    /// kể cả khi `self` đã thành `nil` (vì closure bắt `[weak self]`, nó không
+    /// giữ app sống, nhưng chính cái đăng ký vẫn còn và vẫn được gọi).
+    ///
+    /// Hiện tại chưa rò vì `AppController` là singleton sống suốt đời app và
+    /// `watchScreenState()` chỉ được gọi **một** lần. Nhưng đây đúng loại lỗi
+    /// âm ỉ: gọi thêm một lần nữa khi tái cấu trúc là số đăng ký nhân lên, và
+    /// không có gì trong mã báo cho biết. Giữ token để `deinit` gỡ là cách
+    /// đúng, và gần như không tốn gì.
+    private var observerTokens: [NSObjectProtocol] = []
+
     private func watchScreenState() {
         // Cắm/rút màn hình, đổi độ phân giải: widget có thể rơi ra ngoài mọi
         // màn hình và biến mất. Kéo về vùng nhìn thấy được.
-        NotificationCenter.default.addObserver(
+        observerTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in
                 if self?.widget.recoverIfOffscreen() == true { self?.rebuildMenu() }
-            }
+            })
 
         let nc = NSWorkspace.shared.notificationCenter
-        nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) {
+        observerTokens.append(nc.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) {
             [weak self] _ in
             self?.screenAsleep = true
             self?.timer?.invalidate()
             self?.timer = nil
-        }
-        nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) {
+        })
+        observerTokens.append(nc.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) {
             [weak self] _ in
             guard let self else { return }
             self.screenAsleep = false
@@ -105,6 +121,13 @@ final class AppController: NSObject, NSApplicationDelegate {
             // tối sang, một bức mới hợp lý hơn bức đang chiếu lúc ngủ.
             if settings.changeOnWake { self.advance() }
             self.scheduleTimer()
+        })
+    }
+
+    deinit {
+        for t in observerTokens {
+            NotificationCenter.default.removeObserver(t)
+            NSWorkspace.shared.notificationCenter.removeObserver(t)
         }
     }
 
@@ -312,6 +335,11 @@ final class AppController: NSObject, NSApplicationDelegate {
         images = []
         timer?.invalidate()
         timer = nil
+        // PHẢI dọn widget. Trước đây hàm này chỉ dọn phía "dữ liệu", nên tấm ảnh
+        // cuối cùng vẫn nằm trên màn hình mãi mãi: danh sách rỗng thì không còn
+        // gì ra lệnh đổi ảnh, mà bộ đếm giờ đã bị tắt. Người dùng bấm "Bỏ thư mục"
+        // xong nhìn thấy ảnh vẫn còn, dễ tưởng nút hỏng.
+        widget.clear()
         rebuildMenu()
     }
 

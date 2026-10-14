@@ -24,7 +24,6 @@ final class DraggableView: NSView {
     let session = DragSession()
 
     private var tracking: NSTrackingArea?
-    private var hoverPushed = false
 
     var isPressed: Bool { session.isPressed }
     var isDragging: Bool { session.isDragging }
@@ -83,26 +82,26 @@ final class DraggableView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         onHover?(true)
-        guard !isPressed, !isDragging, !hoverPushed else { return }
-        NSCursor.pointingHand.push()
-        hoverPushed = true
     }
 
     override func mouseExited(with event: NSEvent) {
         onHover?(false)
-        guard hoverPushed else { return }
-        // Trong lúc kéo, cửa sổ trượt dưới con trỏ đứng yên cũng sinh ra
-        // entered/exited — bỏ qua để không làm lệch ngăn xếp cursor.
-        guard !isPressed, !isDragging else { return }
-        popHoverCursorIfNeeded()
     }
 
-    /// Trả con trỏ rê nếu đang giữ. Tách riêng vì `DragSession` cần gọi lúc
-    /// kết thúc một lần nhấn, khi `mouseExited` có thể đã không tới.
-    func popHoverCursorIfNeeded() {
-        guard hoverPushed else { return }
-        NSCursor.pop()
-        hoverPushed = false
+    /// Con trỏ trỏ tay do AppKit quản lý, **không** tự `push()`/`pop()`.
+    ///
+    /// Trước đây hàm này `NSCursor.pointingHand.push()` khi rê vào và `pop()` khi
+    /// rê ra. Ngăn xếp con trỏ của macOS là **toàn cục cho cả máy**: lệch một
+    /// lần là toàn bộ con trỏ trên máy còn kẹt — kể cả khi trỏ vào Desktop.
+    ///
+    /// Còn nữa, `mouseExited` **có thể bị rớt**: khi cửa sổ trượt dưới con trỏ
+    /// đang đứng yên, AppKit sinh cặp entered/exited, và nếu một phía bị mất
+    /// thì stack lệch. `addCursorRect` không có đường nào để lệch: AppKit tự
+    /// trả con trỏ về nguyên trạng khi ra khỏi `bounds`.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard !isPressed, !isDragging else { return }
+        addCursorRect(bounds, cursor: .pointingHand)
     }
 }
 
@@ -362,13 +361,6 @@ final class WidgetWindow {
         s.onHint = { [weak self] in self?.holdHint() }
         s.onHintCancel = { [weak self] in self?.cancelHoldHint() }
         s.onArmed = { [weak self] in self?.armSnapMode() }
-        // Chuột có thể đã ra ngoài view lúc thả — đồng bộ lại con trỏ rê.
-        s.onEnd = { [weak view] in
-            guard let v = view, let w = v.window,
-                  !v.bounds.contains(v.convert(w.convertPoint(fromScreen: NSEvent.mouseLocation),
-                                                from: nil)) else { return }
-            v.popHoverCursorIfNeeded()
-        }
         view.onHover = { [weak self] hovering in
             guard let self else { return }
             self.container.isHidden = false
@@ -645,6 +637,22 @@ private func layout() {
     func setControlsVisible(_ v: Bool) {
         guard !container.isPressed else { return }
         controls.isHidden = !v
+    }
+
+    /// Dọn sạch hoàn toàn — dùng khi **không còn ảnh nào** để hiện.
+    ///
+    /// Chỉ `orderOut` thì chưa đủ: hai `ImageCanvas` vẫn giữ `NSImage` cũ. Mà
+    /// `AppController.clearFolders()` xoá sạch danh sách ảnh rồi dừng hẳn bộ
+    /// đếm giờ — không còn gì ra lệnh đổi ảnh nữa, nên tấm ảnh cuối cùng sẽ nằm
+    /// chình ình trên màn hình **vĩnh viễn**. Người dùng dễ tưởng nút "Bỏ thư
+    /// mục" bị hỏng.
+    func clear() {
+        currentImage = nil
+        imageView.image = nil
+        topView.image = nil
+        overlay.hide()
+        setControlsVisible(false)
+        window.orderOut(nil)
     }
 
     func setPinned(_ p: Bool) { controls.isPinned = p }

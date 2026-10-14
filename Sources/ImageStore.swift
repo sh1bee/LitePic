@@ -254,6 +254,13 @@ enum ImageStore {
     /// tồn tại từ các lần đổi cấu hình, tốn gấp đôi dung lượng cần thiết.
     /// `keepPixels == nil` nghĩa là giữ tất cả (chỉ còn chặn trần dung lượng).
     static func pruneCache(keepPixels pixels: Int?) {
+        // Cùng lý do như `clearCache()`: đây là thao tác **xoá file**, mà file
+        // đó có thể đang được `writeCache` ghi trên `decodeQueue`. Đưa cùng một
+        // hàng đợi nối tiếp thì không còn việc xoá nhầm file đang gửi.
+        decodeQueue.async { pruneCacheNow(keepPixels: pixels) }
+    }
+
+    private static func pruneCacheNow(keepPixels pixels: Int?) {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(
             at: cacheDir,
@@ -296,7 +303,18 @@ enum ImageStore {
 
     static func clearCache() {
         clearMemory()
-        try? FileManager.default.removeItem(at: cacheDir)
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        // PHẢI xếp vào `decodeQueue`, không làm thẳng trên luồng gọi.
+        //
+        // `decodeQueue` là hàng đợi **nối tiếp**: mọi ghi cache đều chạy trên đó.
+        // Nếu `clearCache()` xoá thư mục ngay trên luồng menu (main) thì nó có
+        // thể chen giữa lúc một ảnh đang giải mã, và `writeCache` sau đó ghi vào
+        // thư mục vừa bị xoá — ghi hỏng, hoặc tạo file mồ côi ngoài sự quản lý.
+        // Bằng cách xếp hàng, việc dọn dẹp luôn nằm **sau** mọi việc giải mã
+        // đang dở, không còn đường tranh chấp nào trên đĩa.
+        decodeQueue.async {
+            try? FileManager.default.removeItem(at: cacheDir)
+            try? FileManager.default.createDirectory(at: cacheDir,
+                                                     withIntermediateDirectories: true)
+        }
     }
 }

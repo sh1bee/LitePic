@@ -462,3 +462,99 @@ bản. Một sửa không đổi gì mà sinh ra thay đổi — loại sai mà 
 được, chứ không phải đọc code.
 
 > **Sửa "không đổi gì" là loại sửa nguy hiểm nhất:** dễ tin là vô hại, dễ để sót.
+
+---
+
+## 9. Đợt 14/10 (tiếp): năm điểm rà soá — hai cái đúng, hai cái đúng *một nửa*
+
+Có lẽ mục này đáng giá nhất: **nguyên nhân đúng, cơ chế sai** xuất hiện ở cả hai
+điểm kỹ thuật khó nhất.
+
+### #1 "Mất focus thì mất `mouseUp`" — không phải vậy
+
+Đây là điều tôi chắc chắn nhất cho là sai trước khi đọc kỹ: trên macOS, app đã
+nhận `mouseDown` thì **giữ mouse grab**. Kéo và thả vẫn về app đó dù Cmd+Tab, dù
+Mission Control, dù Zalo bật lên. Nên kịch bản bạn mô tả **không gây kẹt**.
+
+Nhưng phần đáng sửa thì có: `begin()` chỉ thoát khỏi `while true` ở nhánh
+`.leftMouseUp`, **không có đường thoát nào khác**. Nếu sự kiện đó thất lạc — màn
+hình ngủ giữa chừng chẳng hạn — thì treo vô hạn.
+
+Và tôi đo được, không suy:
+
+```
+trước khi sửa: thả chuột "cứu tinh" post giây thứ 6 -> vong lap moi ra (6.30s)
+sau khi sửa:   thoat tu o 2.90s
+```
+
+Chó canh tôi để **hẹp**, vì hẹp là thứ an toàn:
+
+| điều kiện | ngưỡng |
+|---|---|
+| mất focus liên tục | 1.0s |
+| không có sự kiện nào | 30s |
+
+Không thể chặn theo thời gian im lặng thuần — người dùng cầm widget lên suy nghĩ
+vài giây là chuyện thường, đó chính là lý do có `settleDuration`. Nên 30s mới
+đủ dài để không đụng vào việc thật.
+
+Và phải đo **cả hai chiều**: im lặng thì thoát, còn kéo thật 4 giây (vượt ngưỡng)
+thì **không** bị cắt. 4.01s. Nếu chỉ đo một chiều thì dễ giao một cái chó canh
+phá hỏng luôn cả tính năng.
+
+### #5 Con trỏ — code cũ đã có phòng thủ, nhưng đổi hẳn vẫn đáng
+
+Trong lúc đọc tôi thấy code cũ **đã có** `hoverPushed` chặn trùng và
+`popHoverCursorIfNeeded()` gọi lúc kết thúc kéo — tức là người viết ra nó đã nghĩ
+tới lệch ngăn xếp. Rủi ro thấp hơn mô tả.
+
+Nhưng `addCursorRect` vẫn hơn: AppKit **không có đường nào để lệch**, còn
+`push`/`pop` thì có. Và ngăn xếp con trỏ là toàn cục cho cả máy — lệch một lần
+là con trỏ *cả hệ thống* còn kẹt, đúng cái bạn mô tả. Đổi hẳn, bỏ hai cờ.
+
+### #2 và #3 — đúng hoàn toàn
+
+"Bỏ thư mục" xong ảnh còn vĩnh viễn: đúng, và chỉ `orderOut` thì chưa đủ vì hai
+`ImageCanvas` vẫn giữ `NSImage`. Thêm `clear()` xoá cả hai lớp.
+
+Đua luồng cache đĩa: đúng. `decodeQueue` là hàng đợi nối tiếp, nên chỉ việc đưa
+`clearCache()` vào đó là hết tranh chấp — việc dọn luôn nằm **sau** mọi việc giải
+mã đang dở. `pruneCache()` cũng xoá file nên chuyển theo.
+
+### #4 Observer — phải nói đúng mức độ
+
+Đúng, nhưng **hiện tại chưa rò gì**: `AppController` là singleton và
+`watchScreenState()` chỉ gọi một lần. Đây là lỗi âm ỉ — hôm nay một lần, ngày
+sau tái cấu trúc gọi hai lần thì nhân lên mà **không có gì trong mã báo cho biết**.
+Giữ token, gỡ trong `deinit`.
+
+---
+
+### Hai lần tôi tự làm hỏng phép đo — cùng một loại
+
+**Lần một.** Để đo `begin()` kết thúc lúc nào, tôi bọc `pump(12)` rồi đo thời gian
+quanh nó — nên luôn ra ~12s, **đo cái gì không liên quan**. Đúng phải đo thời
+điểm `onEnd` chạy.
+
+**Lần hai.** Hồi quy mục I fail: kéo 4 giây mà chỉ 2.51s. Tôi đã nghi chó canh
+hỏng. Nhưng không phải — **lỗi ở test của tôi**: lần thả chuột "cứu tinh" hẹn ở
+giây 6 của chiều (1) vẫn còn treo, và nó bay sang vòng kéo của chiều (2) để kết
+thúc giữa chừng.
+
+Đây chính là bẫy "event sót" đã ghi ở mục 3 của `BUGS.md` — nhưng lần này sót là
+**timer đã hẹn**, không phải sự kiện chuột. Vẫn phải `drain`.
+
+> Đây là lần thứ hai trong dự án tôi kết luận sai trước khi đo lại. Lần đầu là
+> `bench.sh` báo rò rỉ giả. Cùng một nguyên nhân gốc: **tin con số của phép đo mà
+> chưa hỏi phép đo có đo đúng thứ không.**
+
+### Bài học về việc nhận đề xuất sửa
+
+Trong năm điểm này:
+- 3 điểm sửa y nguyên và đúng
+- 2 điểm **đúng nguyên nhân, sai cơ chế** — và nếu dán thẳng thì tôi sẽ thêm
+  `.any` event vào mask rồi `sendEvent` lại mọi thứ, tức nuốt sự kiện bàn phím
+  của cả hệ thống trong lúc kéo
+
+Và ở cả hai, phần sai là phần **nguy hiểm nhất nếu làm theo**. Nên vẫn phải kiểm
+từng cái, dù người viết rất cẩn thận.

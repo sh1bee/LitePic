@@ -1,0 +1,2753 @@
+
+--- FILE: Sources/AppController.swift ---
+import AppKit
+
+final class AppController: NSObject, NSApplicationDelegate {
+    private let settings = Settings.shared
+    private let widget = WidgetWindow()
+
+    private var status: NSStatusItem?
+    private var timer: Timer?
+    private var images: [URL] = []
+    private var lastIndex: Int = -1
+
+    /// Ảnh đang ghim — bộ đếm bỏ qua nó để không đổi vô ích.
+    private var isPinned: Bool { settings.pinnedURL != nil }
+    private var paused = false
+    private var screenAsleep = false
+    /// Đang có một lần thử đổi ảnh hoãn vì người dùng đang kéo widget.
+    private var retryScheduled = false
+    private var rescanPending = false
+    private var rescanScheduled = false
+
+    /// Theo dõi thay đổi trong thư mục ảnh, để không phải bấm Reload tay.
+    private let watcher = FolderWatcher()
+
+    private static let intervalChoices: [(String, Int)] = [
+        ("15 giây", 15), ("30 giây", 30), ("1 phút", 60),
+        ("5 phút", 300), ("10 phút", 600), ("30 phút", 1800),
+    ]
+
+    private static let maxEdgeChoices = [360, 520, 700, 900]
+    private static let widthChoices: [CGFloat] = [320, 480, 700]
+    private static let fixedChoices: [(String, CGFloat, CGFloat)] = [
+        ("Dọc 360×480", 360, 480),
+        ("Ngang 480×360", 480, 360),
+        ("Vuông 480×480", 480, 480),
+        ("Rộng 640×360", 640, 360),
+    ]
+    private static let opacityChoices: [Int] = [40, 60, 80, 100]
+
+    // MARK: - Vòng đời
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Theo dõi thư mục: thêm/xoá ảnh thì tự cập nhật, không cần bấm lại menu.
+        // Cờ `rescan` để gom nhiều sự kiện FSEvents liên tiếp thành một lần quét.
+        watcher.onChange = { [weak self] in
+            guard let self else { return }
+            self.rescanPending = true
+            if !self.rescanScheduled {
+                self.rescanScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    guard let self else { return }
+                    self.rescanScheduled = false
+                    guard self.rescanPending else { return }
+                    self.rescanPending = false
+                    self.reload()
+                }
+            }
+        }
+        installStatusItem()
+        watchScreenState()
+        reload()
+        widget.wireControls(onPrev: { [weak self] in self?.step(-1) },
+                            onNext: { [weak self] in self?.step(1) },
+                            onPin: { [weak self] in self?.togglePin() })
+        widget.wireDrop { [weak self] urls in self?.adoptDroppedFiles(urls) }
+        widget.setControlsVisible(false)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        timer?.invalidate()
+        timer = nil
+        watcher.stop()
+    }
+
+    // MARK: - Thanh menu
+
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.image = NSImage(systemSymbolName: "photo", accessibilityDescription: "LitePic")
+        item.button?.imagePosition = .imageOnly
+        status = item
+        rebuildMenu()
+    }
+
+    private func watchScreenState() {
+        // Cắm/rút màn hình, đổi độ phân giải: widget có thể rơi ra ngoài mọi
+        // màn hình và biến mất. Kéo về vùng nhìn thấy được.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                if self?.widget.recoverIfOffscreen() == true { self?.rebuildMenu() }
+            }
+
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) {
+            [weak self] _ in
+            self?.screenAsleep = true
+            self?.timer?.invalidate()
+            self?.timer = nil
+        }
+        nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) {
+            [weak self] _ in
+            guard let self else { return }
+            self.screenAsleep = false
+            // Thức dậy là dịp tự nhiên để đổi ảnh — người dùng vừa từ chỗ
+            // tối sang, một bức mới hợp lý hơn bức đang chiếu lúc ngủ.
+            if settings.changeOnWake { self.advance() }
+            self.scheduleTimer()
+        }
+    }
+
+    private func rebuildMenu() {
+        // Widget và thanh menu dùng hai instance riêng — dùng chung một NSMenu
+        // cho hai nơi hiển thị dễ gây xung đột khi menu đang mở.
+        status?.menu = buildMenu()
+        widget.setContextMenu(buildMenu())
+    }
+
+    private func buildMenu() -> NSMenu {
+        let m = NSMenu()
+        m.autoenablesItems = false
+
+        let levelMenu = NSMenu()
+        for mode in LevelMode.allCases {
+            add(levelMenu, mode.title, #selector(pickLevel), tag: mode.rawValue,
+                state: settings.levelMode == mode ? .on : .off)
+        }
+        m.addItem(submenu("Hiển thị", levelMenu))
+        m.addItem(.separator())
+
+        add(m, "Chọn thư mục ảnh…", #selector(chooseFolders))
+        if !settings.folderPaths.isEmpty {
+            add(m, "Bỏ thư mục (\(images.count) ảnh)", #selector(clearFolders))
+        }
+        // Báo thẳng thư mục nào hỏng, thay vì im lặng cho người dùng tưởng hỏng app.
+        let gone = settings.missingFolders
+        if !gone.isEmpty {
+            let note = NSMenuItem(
+                title: "\(gone.count) thư mục không mở được (ổ chưa mount?)",
+                action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            m.addItem(note)
+        }
+        m.addItem(.separator())
+
+        m.addItem(submenu("Đổi ảnh", intervalMenu()))
+        m.addItem(submenu("Kích thước", sizeMenu()))
+
+        let qualityMenu = NSMenu()
+        for (label, value) in [("Sắc nét (2×)", 2), ("Tiết kiệm (1×)", 1)] {
+            add(qualityMenu, label, #selector(pickRenderScale), tag: value,
+                state: Int(settings.renderScale) == value ? .on : .off)
+        }
+        m.addItem(submenu("Chất lượng", qualityMenu))
+
+        // Chỉ có tác dụng ở chế độ *Kích thước cứng* — hai chế độ còn lại tính
+        // cửa sổ theo đúng tỉ lệ ảnh nên không bao giờ thừa hay thiếu chỗ.
+        if settings.sizeMode == .fixed {
+            let fillMenu = NSMenu()
+            for f in FillMode.allCases {
+                add(fillMenu, f.title, #selector(pickFillMode), tag: f.rawValue,
+                    state: settings.fillMode == f ? .on : .off)
+            }
+            m.addItem(submenu("Cách điền ảnh", fillMenu))
+        }
+
+        let opacityMenu = NSMenu()
+        for pct in Self.opacityChoices {
+            add(opacityMenu, "\(pct)%", #selector(pickOpacity), tag: pct,
+                state: Int(settings.opacity * 100) == pct ? .on : .off)
+        }
+        m.addItem(submenu("Độ mờ", opacityMenu))
+
+        let frameMenu = NSMenu()
+        for f in FrameStyle.allCases {
+            add(frameMenu, f.title, #selector(pickFrame), tag: f.rawValue,
+                state: settings.frameStyle == f ? .on : .off)
+        }
+        m.addItem(submenu("Khung ảnh", frameMenu))
+
+        add(m, "Đổi ảnh khi thức dậy", #selector(toggleChangeOnWake),
+            state: settings.changeOnWake ? .on : .off)
+        m.addItem(.separator())
+
+        let hint = NSMenuItem(title: "Kéo xong là tự khe vào lưới", action: nil, keyEquivalent: "")
+        hint.isEnabled = false
+        m.addItem(hint)
+        add(m, "Đặt tự do (không khe lưới)", #selector(toggleSnap),
+            state: settings.snapToGrid ? .off : .on)
+        add(m, paused ? "Tiếp tục phát" : "Tạm dừng",
+            #selector(togglePause), state: paused ? .on : .off)
+
+        m.addItem(.separator())
+        add(m, "Mở ảnh trong Finder", #selector(revealCurrent))
+        add(m, "Xoá cache ảnh", #selector(clearImageCache))
+        m.addItem(.separator())
+        add(m, "Tự chạy khi đăng nhập", #selector(toggleLaunchAtLogin),
+            state: LaunchAtLogin.isEnabled ? .on : .off)
+        if LaunchAtLogin.isEnabled {
+            // Nói rõ thay vì để người dùng tưởng đã có hiệu lực.
+            let note = NSMenuItem(title: "Có hiệu lực từ lần đăng nhập kế tiếp",
+                                  action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            m.addItem(note)
+        }
+        add(m, "Thoát LitePic", #selector(quitApp))
+
+        return m
+    }
+
+    private func intervalMenu() -> NSMenu {
+        let sub = NSMenu()
+        add(sub, "Ngẫu nhiên", #selector(toggleRandom), state: settings.randomInterval ? .on : .off)
+        sub.addItem(.separator())
+        for (label, secs) in Self.intervalChoices {
+            add(sub, label, #selector(pickInterval), tag: secs,
+                state: !settings.randomInterval && settings.interval == Double(secs) ? .on : .off)
+        }
+        return sub
+    }
+
+    private func sizeMenu() -> NSMenu {
+        let sub = NSMenu()
+        for mode in SizeMode.allCases {
+            add(sub, mode.title, #selector(pickSizeMode), tag: mode.rawValue,
+                state: settings.sizeMode == mode ? .on : .off)
+        }
+        sub.addItem(.separator())
+
+        switch settings.sizeMode {
+        case .fitImage:
+            for edge in Self.maxEdgeChoices {
+                add(sub, "Cạnh lớn \(edge)pt", #selector(pickMaxEdge), tag: edge,
+                    state: Int(settings.maxEdge) == edge ? .on : .off)
+            }
+        case .fitWidth:
+            for w in Self.widthChoices {
+                add(sub, "Rộng \(Int(w))pt", #selector(pickWidth), tag: Int(w),
+                    state: Int(settings.width) == Int(w) ? .on : .off)
+            }
+        case .fixed:
+            for (label, w, h) in Self.fixedChoices {
+                let mi = NSMenuItem(title: label, action: #selector(pickFixed), keyEquivalent: "")
+                mi.target = self
+                mi.tag = Int(w)
+                mi.representedObject = ["w": w, "h": h]
+                mi.state = (Int(settings.width), Int(settings.height)) == (Int(w), Int(h)) ? .on : .off
+                sub.addItem(mi)
+            }
+        }
+        return sub
+    }
+
+    /// `addItem` trả về Void, nên không thể gắn `.state` kiểu nối chuỗi — dựng item trước.
+    private func add(_ menu: NSMenu,
+                     _ title: String,
+                     _ action: Selector,
+                     tag: Int = 0,
+                     state: NSControl.StateValue = .off) {
+        let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        mi.target = self
+        mi.tag = tag
+        mi.state = state
+        menu.addItem(mi)
+    }
+
+    private func submenu(_ title: String, _ menu: NSMenu) -> NSMenuItem {
+        let mi = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        mi.submenu = menu
+        return mi
+    }
+
+    // MARK: - Nguồn ảnh
+
+    private func reload() {
+        let folders = settings.folders
+        images = ImageStore.files(in: folders)
+        lastIndex = -1
+        // Theo dõi đúng các thư mục đang dùng — vị trí có thể đổi sau khi
+        // bookmark giải ra đường dẫn thật.
+        watcher.watch(folders)
+        Diag.log("reload: \(images.count) anh tu \(folders.count) thu muc")
+        rebuildMenu()
+        scheduleTimer()
+        pruneCache()
+        if !images.isEmpty {
+            // KHÔNG giải mã hết loạt ảnh lúc mở. Bản cũ làm vậy và đo được:
+            // CPU +1.25s, RAM 24 MB -> 52 MB, trong khi phần lớn ảnh đó không
+            // bao giờ được xem. Ảnh giờ được giải mã khi thật sự cần, ngoài luồng
+            // chính, và nhớ lại trong RAM cho lần xem sau.
+            ImageStore.clearMemory()
+            advance()
+            // Cửa sổ khác đang che widget? Tự nâng lên tầng nổi để bấm được.
+            if widget.autoLiftIfOccluded() { rebuildMenu() }
+        }
+    }
+
+    @objc private func chooseFolders() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.prompt = "Chọn"
+        panel.message = "Chọn một hoặc nhiều thư mục chứa ảnh"
+        guard panel.runModal() == .OK else { return }
+        settings.folderPaths = panel.urls.map(\.path)
+        reload()
+    }
+
+    @objc private func clearFolders() {
+        settings.folderPaths = []
+        images = []
+        timer?.invalidate()
+        timer = nil
+        rebuildMenu()
+    }
+
+    // MARK: - Timer
+
+    private func scheduleTimer() {
+        timer?.invalidate()
+        timer = nil
+        guard !paused, !screenAsleep, images.count > 1 else { return }
+
+        let interval: TimeInterval
+        if settings.randomInterval {
+            let lo = min(settings.minInterval, settings.maxInterval)
+            let hi = max(settings.minInterval, settings.maxInterval)
+            interval = Double.random(in: lo...max(lo + 1, hi))
+        } else {
+            interval = settings.interval
+        }
+
+        // Timer không lặp: hẹn lại sau mỗi lần đổi, nên nhịp ngẫu nhiên thực sự ngẫu nhiên.
+        let t = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.advance()
+            self.scheduleTimer()
+        }
+        // Cho phép hệ thống gom lại để tiết kiệm năng lượng.
+        t.tolerance = interval * 0.15
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private func advance() {
+        guard !images.isEmpty else { return }
+        // Đang giữ/kéo widget mà đổi ảnh thì cửa sổ đổi kích thước và giật
+        // khỏi tay người dùng — thử lại sau 5 giây thay vì đổi ngay.
+        //
+        // Chỉ hẹn MỘT lần thử lại. Bản cũ hẹn mới mỗi lần gặp: nếu người dùng
+        // giữ chuột kéo widget, cứ 5 giây lại dồn thêm một hẹn giờ, và khi thả
+        // ra cả đống cùng chạy — mỗi cái lại tự hẹn thêm một cái nữa.
+        if widget.busy {
+            guard !retryScheduled else { return }
+            retryScheduled = true
+            Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+                self?.retryScheduled = false
+                self?.advance()
+            }
+            return
+        }
+        // Ảnh đã ghim: đứng yên.
+        if isPinned { showPinnedIfNeeded(); return }
+        var idx: Int
+        if images.count == 1 {
+            idx = 0
+        } else {
+            idx = Int.random(in: 0..<images.count)
+            if idx == lastIndex { idx = (idx + 1) % images.count }  // tránh lặp lại liên tiếp
+        }
+        lastIndex = idx
+        widget.show(images[idx])
+    }
+
+    private func showPinnedIfNeeded() {
+        guard let p = settings.pinnedURL,
+              images.contains(where: { $0.path == p }) else { return }
+        if images[lastIndex].path != p, let i = images.firstIndex(where: { $0.path == p }) {
+            lastIndex = i
+            widget.show(images[i])
+        }
+    }
+
+    /// Bước tới ảnh kế tiếp/trước — có xét ảnh ghim.
+    private func step(_ delta: Int) {
+        guard !images.isEmpty else { return }
+        // pool các ảnh được phép hiện (bỏ ảnh đang ghim nếu còn ảnh khác)
+        var pool = images
+        if isPinned, images.count > 1 {
+            pool = images.filter { $0.path != settings.pinnedURL }
+        }
+        guard !pool.isEmpty else { return }
+        let cur = images[lastIndex]
+        let curInPool = pool.firstIndex(of: cur) ?? 0
+        let next = ((curInPool + delta) % pool.count + pool.count) % pool.count
+        if let i = images.firstIndex(of: pool[next]) {
+            lastIndex = i
+            widget.show(images[i])
+        }
+        rebuildMenu()
+    }
+
+    /// Người dùng thả file/thư mục từ Finder vào widget.
+    ///
+    ///   - Thả THƯ MỤC  -> thêm vào danh sách thư mục ảnh.
+    ///   - Thả ẢNH      -> thêm thư mục chứa nó (nếu chưa có), hiện ảnh đó và
+    ///                     ghim lại. Ghim vì người dùng chọn đúng ảnh này, không
+    ///                     phải đợi timer tình cờ quay lại tới.
+    private func adoptDroppedFiles(_ urls: [URL]) {
+        let fm = FileManager.default
+        var paths = settings.folderPaths
+        var changed = false
+
+        for u in urls {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: u.path, isDirectory: &isDir) else {
+                Diag.log("drop bo qua (khong ton tai): \(u.path)")
+                continue
+            }
+            let folder = isDir.boolValue ? u : u.deletingLastPathComponent()
+            if !paths.contains(folder.path) {
+                paths.append(folder.path)
+                changed = true
+            }
+        }
+        Diag.log("drop: \(urls.count) muc, \(changed ? "co thay doi" : "khong doi gi")")
+
+        if changed {
+            settings.folderPaths = paths
+            reload()
+        }
+
+        // Ảnh đầu tiên được thả: hiện và ghim.
+        let dropped = urls.filter {
+            ImageStore.supported.contains($0.pathExtension.lowercased())
+        }
+        guard let pick = dropped.first else {
+            if changed { widget.settleNow() }
+            return
+        }
+        if let i = images.firstIndex(where: { $0.path == pick.path }) {
+            lastIndex = i
+            widget.show(images[i], evenIfBusy: true)
+            settings.pinnedURL = images[i].path
+            widget.setPinned(true)
+        }
+        rebuildMenu()
+    }
+
+    private func togglePin() {
+        if isPinned {
+            settings.pinnedURL = nil
+        } else if images.indices.contains(lastIndex) {
+            settings.pinnedURL = images[lastIndex].path
+        }
+        widget.setPinned(isPinned)
+        rebuildMenu()
+    }
+
+    private func applyAppearance() {
+        widget.applyAll()
+        // Đổi cỡ từ menu là chủ động của người dùng nên áp dụng ngay kể cả khi bận.
+        if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+        pruneCache()
+        rebuildMenu()
+    }
+
+    /// Dọn cache của các mức kích thước không còn dùng.
+    ///
+    /// Mỗi mức là một bộ file riêng, nên đổi cỡ widget hay hạ chất lượng sẽ để lại
+    /// mức cũ mãi mãi. Gọi ở mọi lần đổi kích thước hiển thị.
+    private func pruneCache() {
+        ImageStore.pruneCache(keepPixels: ImageStore.pixelBucket(for: widget.displayMaxPixel))
+    }
+
+    // MARK: - Hành động menu
+
+    @objc private func toggleRandom() {
+        settings.randomInterval.toggle()
+        scheduleTimer()
+        rebuildMenu()
+    }
+
+    @objc private func pickInterval(_ sender: NSMenuItem) {
+        settings.interval = Double(sender.tag)
+        settings.randomInterval = false
+        scheduleTimer()
+        rebuildMenu()
+    }
+
+    @objc private func pickSizeMode(_ sender: NSMenuItem) {
+        settings.sizeMode = SizeMode(rawValue: sender.tag) ?? .fitImage
+        applyAppearance()
+    }
+
+    @objc private func pickMaxEdge(_ sender: NSMenuItem) {
+        settings.maxEdge = CGFloat(sender.tag)
+        applyAppearance()
+    }
+
+    @objc private func pickWidth(_ sender: NSMenuItem) {
+        settings.width = CGFloat(sender.tag)
+        applyAppearance()
+    }
+
+    @objc private func pickFixed(_ sender: NSMenuItem) {
+        if let d = sender.representedObject as? [String: CGFloat] {
+            settings.width = d["w"] ?? 480
+            settings.height = d["h"] ?? 480
+        }
+        applyAppearance()
+    }
+
+    @objc private func pickFillMode(_ sender: NSMenuItem) {
+        settings.fillMode = FillMode(rawValue: sender.tag) ?? .fit
+        widget.applyAll()
+        rebuildMenu()
+    }
+
+    @objc private func revealCurrent(_ sender: Any?) {
+        widget.revealCurrentInFinder()
+    }
+
+    @objc private func pickOpacity(_ sender: NSMenuItem) {
+        settings.opacity = CGFloat(sender.tag) / 100
+        widget.applyOpacity()
+        rebuildMenu()
+    }
+
+    @objc private func pickRenderScale(_ sender: NSMenuItem) {
+        settings.renderScale = CGFloat(sender.tag)
+        pruneCache()
+        rebuildMenu()
+        if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+    }
+
+    @objc private func pickFrame(_ sender: NSMenuItem) {
+        settings.frameStyle = FrameStyle(rawValue: sender.tag) ?? .shadow
+        widget.applyAll()
+        if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+        rebuildMenu()
+    }
+
+    @objc private func toggleChangeOnWake() {
+        settings.changeOnWake.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func pickLevel(_ sender: NSMenuItem) {
+        settings.levelMode = LevelMode(rawValue: sender.tag) ?? .floating
+        widget.applyLevel()
+        rebuildMenu()
+    }
+
+    @objc private func toggleSnap() {
+        settings.snapToGrid.toggle()
+        if settings.snapToGrid {
+            // Bật lại thì kéo widget về đúng ô luôn.
+            widget.settleNow()
+        }
+        rebuildMenu()
+    }
+
+    @objc private func togglePause() {
+        paused.toggle()
+        scheduleTimer()
+        rebuildMenu()
+    }
+
+    @objc private func clearImageCache() {
+        ImageStore.clearCache()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let want = !LaunchAtLogin.isEnabled
+        if let err = LaunchAtLogin.set(want) {
+            let a = NSAlert()
+            a.messageText = "Không đổi được tự chạy"
+            a.informativeText = err
+            a.alertStyle = .warning
+            a.runModal()
+        }
+        rebuildMenu()
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
+    }
+}
+--- FILE: Sources/Bookmarks.swift ---
+import AppKit
+
+/// Bám theo thư mục ảnh khi nó bị di chuyển/đổi tên trên đĩa.
+///
+/// Vì sao cần: nếu người dùng đổi tên thư mục ảnh (hay mount ổ ra rồi tắt),
+/// đường dẫn lưu trong tuỳ chọn sẽ hỏng và LitePic im lặng không hiện ảnh nào.
+/// Bookmark của Foundation trỏ tới đúng thứ đó.
+///
+/// Lưu ý quan trọng: option `.withSecurityScope` **chỉ hoạt động trong app đã
+/// sandbox**. LitePic cố tình không sandbox (cần đọc thư mục tùy ý và cập nhật
+/// app tại chỗ), nên dùng option đó sẽ luôn thất bại — đã kiểm chứng bằng đo:
+/// `withSecurityScope` → FAIL, `minimalBookmark` → OK 1060 byte.
+///
+/// Điểm mấu chốt về thiết kế: bookmark KHÔNG phải nguồn sự thật. Danh sách
+/// `folders` trong tuỳ chọn mới là nguồn sự thật (thứ tự, thành phần); bookmark
+/// chỉ dùng để SỬA đường dẫn mỗi mục. Bản cũ làm ngược lại — `resolve()` trả
+/// về danh sách riêng của nó và thay thế hoàn toàn `folders`, nên khi người dùng
+/// bỏ hết thư mục thì app vẫn cứ lấy thư mục cũ ra hiển thị. Đo được: bỏ hết
+/// thư mục rồi khởi động lại, app vẫn tự giải mã 24 ảnh (CPU 1.25s) dù danh
+/// sách trong tuỳ chọn đã rỗng.
+enum Bookmarks {
+    private static let key = "litepic.folderBookmarks"
+
+    /// Một cặp: đường dẫn đã chọn + bookmark của nó.
+    ///
+    /// Cần cặp chứ không chỉ bookmark, vì phải ánh xạ ngược bookmark về đúng mục
+    /// trong danh sách mà người dùng đã chọn.
+    private struct Entry: Codable {
+        let path: String
+        let data: Data
+    }
+
+    /// Ghi lại bookmark cho danh sách thư mục vừa chọn.
+    ///
+    /// Ghi kèm danh sách rỗng thì phải XOÁ luôn mục cũ, không được giữ lại — nếu
+    /// không thì "Bỏ thư mục" trong menu chỉ dọn đúng một nửa vụ việc.
+    static func save(_ folders: [URL]) {
+        guard !folders.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: key)
+            return
+        }
+        let entries: [[String: Any]] = folders.compactMap { f in
+            guard let d = try? f.bookmarkData(options: .minimalBookmark,
+                                              includingResourceValuesForKeys: nil,
+                                              relativeTo: nil) else { return nil }
+            return ["path": f.path, "data": d]
+        }
+        UserDefaults.standard.set(entries, forKey: key)
+    }
+
+    /// Ánh xạ `đường dẫn đã chọn` → `vị trí hiện tại`.
+    ///
+    /// Chỉ trả về mục nào còn đọc được; mục không còn thì không có entry nào, và
+    /// người dùng đơn giản là điều khiển thay cho giá trị cũ.
+    private static func currentLocations() -> [String: URL] {
+        let fm = FileManager.default
+        var out: [String: URL] = [:]
+        for e in UserDefaults.standard.array(forKey: key) as? [[String: Any]] ?? [] {
+            guard let path = e["path"] as? String, let data = e["data"] as? Data else { continue }
+            var stale = false
+            guard let u = try? URL(resolvingBookmarkData: data,
+                                   options: [],   // không có .minimalBookmark ở phía đọc
+                                   relativeTo: nil,
+                                   bookmarkDataIsStale: &stale),
+                  fm.isReadableFile(atPath: u.path) else { continue }
+            out[path] = u
+        }
+        return out
+    }
+
+    /// Vị trí hiện tại cho từng thư mục đã chọn — giữ nguyên thứ tự của danh
+    /// sách gốc.
+    static func resolve(_ paths: [String]) -> [String: URL] {
+        paths.isEmpty ? [:] : currentLocations()
+    }
+
+    /// Thư mục đã chọn mà hiện không đọc được — thường là ổ chưa mount.
+    static func missing(_ paths: [String]) -> [String] {
+        let fm = FileManager.default
+        return paths.filter { !fm.isReadableFile(atPath: $0) }
+    }
+}
+
+--- FILE: Sources/Diag.swift ---
+import AppKit
+
+/// Ghi log chẩn đoán ra file để lần tái hiện lỗi cho biết widget **thực sự**
+/// nhận được gì từ hệ thống — thay vì đoán.
+///
+/// Bật:   defaults write local.litepic.widget diag -bool true
+/// Đọc:   tail -40 ~/Library/Logs/LitePic.log
+/// Tắt:   defaults write local.litepic.widget diag -bool false
+enum Diag {
+    private static let path: String = {
+        let d = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d.appendingPathComponent("LitePic.log").path
+    }()
+
+    static var enabled: Bool = UserDefaults.standard.bool(forKey: "diag")
+
+    /// `s` là autoclosure: khi tắt log, biểu thức nội tuyến KHÔNG được dựng.
+    ///
+    /// Quan trọng về hiệu năng: Swift dựng sẵn đối số trước khi gọi hàm. Với
+    /// `log("chuột xuống tại \(x)")`, chuỗi được cấp phát và nối lại ở MỌI lần
+    /// bấm chuột kể cả khi log đang tắt — thứ vốn không nên tốn một byte heap.
+    static func log(_ s: @autoclosure () -> String) {
+        guard enabled else { return }
+        let line = "\(Date().timeIntervalSince1970)  \(s())\n"
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile()
+            fh.write(line.data(using: .utf8)!)
+            try? fh.close()
+        } else {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Ghi trạng thái cửa sổ: tầng, có bị cửa sổ nào che không.
+    /// `occludedWindows` là nguồn chính xác của việc widget có nhận được click hay không.
+    static func describe(_ w: NSWindow, _ tag: String) {
+        guard enabled else { return }
+        let desk = Int(CGWindowLevelForKey(.desktopWindow))
+        // Cửa sổ nào nằm trên widget (tầng cao hơn) và có cắt qua vùng của nó —
+        // chính là thứ chặn click. Chỉ nhìn `NSApp.windows` của chính app này
+        // không đủ: cửa sổ app khác không nằm trong danh sách đó.
+        let blockers = NSApp.windows
+            .filter { $0 !== w && $0.isVisible && $0.frame.intersects(w.frame) && $0.level > w.level }
+            .map { "\($0.title.isEmpty ? $0.className : $0.title)[\(Int($0.frame.width))x\(Int($0.frame.height))]" }
+        log("""
+            \(tag): frame=\(Int(w.frame.origin.x)),\(Int(w.frame.origin.y)) \
+            \(Int(w.frame.width))x\(Int(w.frame.height)) level=desk+\(w.level.rawValue - desk) \
+            visible=\(w.isVisible) ignoresMouse=\(w.ignoresMouseEvents) key=\(w.isKeyWindow) \
+            CHE_BOI=[\(blockers.joined(separator: ", "))]
+            """)
+    }
+}
+--- FILE: Sources/DragSession.swift ---
+import AppKit
+
+/// Một lần nhấn chuột lên widget, từ lúc nhấn xuống đến lúc thả.
+///
+/// Tách khỏi `DraggableView` để phần rắc rối nhất của ứng dụng — vòng lặp
+/// theo dõi sự kiện, ngưỡng thời gian, ngưỡng chuyển động — nằm riêng một chỗ.
+///
+/// Vì sao tự viết vòng lặp thay vì dùng `sendEvent`:
+/// toàn bộ nhấn → giữ → kéo → thả nằm trong một hàm, nên `mouseUp` LUÔN được
+/// nhận kể cả khi thả ra ngoài cửa sổ. Nếu rải ra nhiều hàm, một lần thả
+/// chuột ở ngoài sẽ làm widget kẹt trạng thái dở dang — lưới còn hiện, widget
+/// phóng to kẹt, lần kéo sau khe sai chỗ.
+final class DragSession {
+    /// Giữ bao lâu thì vào chế độ lưới.
+    ///
+    /// Đã giảm từ 2.0s xuống 1.2s: ở 2 giây người dùng dễ tưởng app treo và
+    /// thả chuột sớm. Log thực đo cho thấy mọi lần thử đều dưới 2s — không ai
+    /// chạm tới mốc cũ. 1.2s vẫn đủ dài để phân biệt với kéo tự do.
+    static let holdDuration: TimeInterval = 1.2
+    /// Đã nhấn, chưa di chuyển bao lâu thì báo "đang giữ" (nhấc nhẹ widget).
+    private static let hintDelay: TimeInterval = 0.25
+    /// Đã kéo xong, đứng yên bao lâu thì vẫn vào chế độ lưới.
+    ///
+    /// Sửa theo cách hiểu của người dùng: kéo đi đâu cũng được, nhưng dừng lại
+    /// thì lưới hiện. Trước đây cứ chuyển động là huỷ lịch giữ — nên "bấm giữ
+    /// rồi kéo" chạy được, còn "kéo rồi dừng" thì không. Giờ cả hai.
+    static let settleDuration: TimeInterval = 1.2
+    /// Dịch chuyển bao nhiêu thì coi là "đã kéo" (điểm).
+    private static let moveThreshold: CGFloat = 3
+
+    /// Kéo tự do — di chuyển đến đâu đặt bấy nhiêu.
+    var onDrag: ((NSPoint) -> Void)?
+    /// Kéo trong chế độ lưới — vẫn di chuyển tự do nhưng cần tô sáng ô.
+    var onSnapDrag: ((NSPoint) -> Void)?
+    var onHint: (() -> Void)?
+    var onHintCancel: (() -> Void)?
+    var onArmed: (() -> Void)?
+    var onDrop: ((DropResult) -> Void)?
+    var onBegin: (() -> Void)?
+    var onEnd: (() -> Void)?
+    /// Bấm chuột phải — AppKit gọi thẳng hàm này, không đi qua vòng lặp.
+    var onDoubleClick: (() -> Void)?
+
+    private(set) var isPressed = false
+    private(set) var isDragging = false
+
+    /// Lệch giữa điểm nhấn và góc cửa sổ, để widget không nhảy khi kéo.
+    private var grabOffset: NSPoint = .zero
+    private var cursorPushed = false
+
+    /// Bắt đầu theo dõi một lần nhấn. `view` dùng để lấy toạ độ và con trỏ.
+    func begin(in view: NSView, event: NSEvent) {
+        // Nhấp đúp không vào vòng kéo — cần kiểm trước vì `mouseDown` thứ hai
+        // của một cú nhấp đúp vẫn có `clickCount == 2`.
+        if event.clickCount >= 2 {
+            onDoubleClick?()
+            return
+        }
+        guard let w = view.window, let p0 = screenPoint(event, in: w) else { return }
+        w.makeKey()
+        grabOffset = NSPoint(x: p0.x - w.frame.origin.x, y: p0.y - w.frame.origin.y)
+
+        onBegin?()
+        isPressed = true
+        isDragging = false
+        var hinted = false
+        var armed = false
+        var moved = false
+        var lastMove = Date()
+        let t0 = Date()
+
+        // Mọi đường thoát đều đi qua đây: trả cursor, hạ cờ.
+        defer {
+            if cursorPushed { NSCursor.pop(); cursorPushed = false }
+            isPressed = false
+            isDragging = false
+            onEnd?()
+        }
+
+        while true {
+            // Hẹn mốc cho lần giữ/đứng yên kế tiếp.
+            // Chưa kéo  -> đếm từ lúc nhấn.
+            // Đã kéo    -> đếm từ lần chuyển động gần nhất, nên kéo xong dừng
+            //              lại vẫn bật được lưới.
+            var deadline: Date? = nil
+            if !moved {
+                if !hinted { deadline = t0.addingTimeInterval(Self.hintDelay) }
+                else if !armed { deadline = t0.addingTimeInterval(Self.holdDuration) }
+            } else if !armed {
+                deadline = lastMove.addingTimeInterval(Self.settleDuration)
+            }
+
+            guard let e = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
+                                          until: deadline,
+                                          inMode: .eventTracking,
+                                          dequeue: true) else {
+                if !armed {
+                    if !hinted {
+                        hinted = true
+                        onHint?()
+                    } else {
+                        armed = true
+                        onArmed?()
+                    }
+                }
+                continue
+            }
+
+            if e.type == .leftMouseUp {
+                if moved {
+                    onDrop?(armed ? .snap : .free)
+                } else if armed {
+                    onDrop?(.snap)   // giữ đủ lâu rồi thả tại chỗ: khe tại chỗ
+                } else {
+                    if hinted { onHintCancel?() }
+                    onDrop?(.click)
+                }
+                return
+            }
+
+            guard e.type == .leftMouseDragged, let p = screenPoint(e, in: w) else { continue }
+            if !moved {
+                if hypot(p.x - p0.x, p.y - p0.y) <= Self.moveThreshold { continue }
+                moved = true
+                isDragging = true
+                NSCursor.closedHand.push()
+                cursorPushed = true
+                if !armed, hinted { onHintCancel?() }
+            }
+            lastMove = Date()
+            let origin = NSPoint(x: p.x - grabOffset.x, y: p.y - grabOffset.y)
+            if armed { onSnapDrag?(origin) } else { onDrag?(origin) }
+        }
+    }
+
+    /// Vị trí chuột theo toạ độ màn hình.
+    ///
+    /// Ưu tiên toạ độ trong event (đúng khi event thuộc về cửa sổ này, gồm cả
+    /// event dựng sẵn trong kiểm thử). Nếu event thuộc cửa sổ khác — xảy ra khi
+    /// rê ra ngoài màn hình nền giữa lúc kéo — dùng vị trí con trỏ toàn cục.
+    private func screenPoint(_ event: NSEvent, in w: NSWindow) -> NSPoint? {
+        if event.windowNumber == w.windowNumber {
+            return w.convertPoint(toScreen: event.locationInWindow)
+        }
+        return NSEvent.mouseLocation
+    }
+}
+
+--- FILE: Sources/FolderWatcher.swift ---
+import AppKit
+import CoreServices
+
+/// Theo dõi thư mục ảnh, tự cập nhật danh sách khi có file thêm/bớt.
+///
+/// Vì sao FSEvents chứ không phải `DispatchSource.makeFileSystemObjectSource`:
+/// trên Darwin, descriptor của một thư mục chỉ báo được một phần sự kiện (đủ
+/// cho thư mục con trực tiếp trong một số trường hợp, không đủ cho tạo/xoá file
+/// ở mọi nơi). FSEvents là API đúng cho việc này — nó theo dõi cây thư mục
+/// và gom các thay đổi dồn dập thành một sự kiện.
+///
+/// Quan trọng cho năng lượng: có `latency` nên nhiều thay đổi trong một khoảng
+/// ngắn chỉ tạo ra MỘT lần thức tỉnh tiến trình — ví dụ copy 500 ảnh chỉ đánh
+/// thức app một lần, chứ không phải 500 lần.
+final class FolderWatcher {
+    init() {}
+
+    private var stream: FSEventStreamRef?
+    private let queue = DispatchQueue(label: "local.litepic.watch", qos: .utility)
+    /// Đường dẫn đang theo dõi — dùng để biết khi nào phải tạo lại stream.
+    private(set) var paths: [String] = []
+
+    /// Gọi khi có thay đổi (đã gom theo latency).
+    var onChange: (() -> Void)?
+
+    /// Bắt đầu theo dõi các thư mục đã cho.
+    func watch(_ folders: [URL]) {
+        let wanted = folders.map(\.standardizedFileURL.path)
+        guard wanted != paths else { return }
+        stop()
+        guard !wanted.isEmpty else { return }
+        paths = wanted
+
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil, release: nil, copyDescription: nil)
+
+        let flags = UInt32(kFSEventStreamCreateFlagUseCFTypes
+                           | kFSEventStreamCreateFlagFileEvents
+                           | kFSEventStreamCreateFlagNoDefer)
+
+        // Chữ ký: (stream, info, soSuKien, conDuong, co, context)
+        // `info` là con trỏ tuỳ ý (Optional), `conDuong` thì không — phải đọc
+        // thẳng, không `guard let`.
+        let callback: FSEventStreamCallback = { _, info, count, rawPaths, _, _ in
+            guard let info else { return }
+            let self_ = Unmanaged<FolderWatcher>.fromOpaque(info).takeUnretainedValue()
+            let paths = rawPaths.bindMemory(to: CFString.self, capacity: count)
+            for i in 0..<count { Diag.log("FSEvent: \(paths[i])") }
+            self_.onChange?()
+        }
+
+        guard let s = FSEventStreamCreate(
+            kCFAllocatorDefault, callback, &context, wanted as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            2.0,          // latency: gom thay đổi, đánh thức app ít lần
+            flags)
+        else {
+            Diag.log("FSEventStreamCreate that bai")
+            paths = []
+            return
+        }
+        stream = s
+        FSEventStreamSetDispatchQueue(s, queue)
+        FSEventStreamStart(s)
+        Diag.log("theo doi \(wanted.count) thu muc")
+    }
+
+    func stop() {
+        if let s = stream {
+            FSEventStreamStop(s)
+            FSEventStreamInvalidate(s)
+            FSEventStreamRelease(s)
+            stream = nil
+        }
+        paths = []
+    }
+}
+
+--- FILE: Sources/FrameStyle.swift ---
+import AppKit
+
+/// View trang trí của khung — đánh dấu bằng subclass để xoá sạch khi đổi kiểu
+/// khung (thuộc tính `tag` của NSView trong Swift là get-only).
+final class FrameDecoration: NSView {}
+
+/// Kiểu khung quanh ảnh.
+///
+/// Mỗi kiểu trả về kích thước vùng trống cần thêm quanh ảnh (`inset`) và một
+/// hàm vẽ lớp trang trí. Ảnh luôn nằm ở giữa khung, tỉ lệ không bị bóp méo.
+enum FrameStyle: Int, CaseIterable {
+    case none
+    case shadow      // bo goc + bong (mac dinh)
+    case polaroid    // vien trang day o duoi, giong anh cua la
+    case film        // vien rang cua phim 35mm
+    case glass       // kinh mo vien sang
+
+    var title: String {
+        switch self {
+        case .none:    return "Không khung"
+        case .shadow:  return "Bóng đổ"
+        case .polaroid: return "Polaroid"
+        case .film:    return "Phim 35mm"
+        case .glass:   return "Kính mờ"
+        }
+    }
+
+    /// Bề dày khung tính từ mép ảnh ra ngoài (điểm).
+    var inset: CGFloat {
+        switch self {
+        case .none:    return 0
+        case .shadow:  return 0
+        case .polaroid: return 22   // vien duoi day -> can nhieu o duoi hon
+        case .film:    return 26
+        case .glass:   return 14
+        }
+    }
+
+    /// Khoảng hở giữa mép khung và mép cửa sổ (điểm).
+    ///
+    /// Hở này là chỗ cho bóng đổ lan ra, chứ không phải viền trang trí. Bản cũ
+    /// để cố định 20pt cho mọi kiểu — nên "Không khung" vẫn thấy một dải tối
+    /// quanh ảnh, vì bóng được vẽ theo mép cửa sổ chứ không theo mép ảnh.
+    ///
+    /// Với bóng: Gaussian 14pt lan ra khoảng 1.5 lần bán kính mỗi phía, cộng
+    /// thêm phần đường bóng được nới ra — tổng cỡ 24pt. Hở nhỏ hơn thì mép cửa
+    /// sổ cắt bóng, để lại một cạnh thẳng cứng cắt ngang góc bo.
+    var pad: CGFloat {
+        switch self {
+        case .none:    return 0    // không bóng -> ảnh áp sát mép cửa sổ
+        case .shadow:  return 26
+        case .glass:   return 10
+        case .polaroid: return 8
+        case .film:    return 8
+        }
+    }
+
+    /// Độ đậm bóng. 0 = không bóng — dùng để "Không khung" thật sự trần.
+    var shadowOpacity: Float {
+        switch self {
+        case .none:   return 0
+        case .shadow: return 0.34
+        case .glass:  return 0.16
+        default:      return 0.26
+        }
+    }
+
+    /// Phần thêm chiều cao o duoi (Polaroid co vien duoi day hon).
+    var extraBottom: CGFloat {
+        switch self {
+        case .polaroid: return 46
+        default:        return 0
+        }
+    }
+
+    /// Bo goc cho o anh.
+    var imageCorner: CGFloat {
+        switch self {
+        case .none, .shadow: return 20
+        case .polaroid, .film: return 2
+        case .glass:          return 14
+        }
+    }
+
+    /// Vẽ lớp trang trí quanh anh. `imageRect` là vung anh trong toa do container.
+    func decorate(in container: NSView, imageRect: NSRect) {
+        container.subviews
+            .filter { $0 is FrameDecoration }
+            .forEach { $0.removeFromSuperview() }
+
+        let i = inset
+        guard i > 0 || extraBottom > 0 else { return }
+
+        switch self {
+        case .none, .shadow:
+            break   // bo + bong do WidgetWindow lo
+
+        case .polaroid:
+            let r = NSRect(x: imageRect.minX - i, y: imageRect.minY - i - extraBottom,
+                           width: imageRect.width + i * 2, height: imageRect.height + i * 2 + extraBottom)
+            let bg = FrameDecoration(frame: r)
+            bg.wantsLayer = true
+            bg.layer?.backgroundColor = NSColor.white.cgColor
+            bg.layer?.shadowColor = NSColor.black.cgColor
+            bg.layer?.shadowOpacity = 0.30
+            bg.layer?.shadowRadius = 12
+            bg.layer?.shadowOffset = CGSize(width: 0, height: -5)
+            container.addSubview(bg, positioned: .below, relativeTo: nil)
+
+        case .film:
+            let r = NSRect(x: imageRect.minX - i, y: imageRect.minY - i,
+                           width: imageRect.width + i * 2, height: imageRect.height + i * 2)
+            let bg = FrameDecoration(frame: r)
+            bg.wantsLayer = true
+            bg.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
+            bg.layer?.cornerRadius = 4
+            // Rang cua: hai hang lo cham cach nhau doc hai ben trong.
+            for side in [true, false] {
+                for k in 0..<14 {
+                    let d = CGFloat(k) * 7
+                    let tooth = FrameDecoration(frame: CGRect(
+                        x: side ? r.minX + 4 + d : r.maxX - 7 + d,
+                        y: r.midY - 8, width: 4, height: 16))
+                    tooth.wantsLayer = true
+                    tooth.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
+                    bg.addSubview(tooth)
+                }
+            }
+            container.addSubview(bg, positioned: .below, relativeTo: nil)
+
+        case .glass:
+            let r = NSRect(x: imageRect.minX - i, y: imageRect.minY - i,
+                           width: imageRect.width + i * 2, height: imageRect.height + i * 2)
+            let g = FrameDecoration(frame: r)
+            g.wantsLayer = true
+            g.layer?.cornerRadius = 16
+            g.layer?.masksToBounds = true
+            g.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor
+            g.layer?.borderWidth = 1
+            g.layer?.borderColor = NSColor.white.withAlphaComponent(0.35).cgColor
+            container.addSubview(g, positioned: .below, relativeTo: nil)
+        }
+    }
+}
+--- FILE: Sources/GridSnapper.swift ---
+import AppKit
+
+/// Thuật toán hình học của lưới khe: tính vị trí các ô và tìm ô gần nhất.
+///
+/// Tách riêng khỏi `WidgetWindow` vì đây là phần **thuần toán** — không chạm
+/// gì tới AppKit, cửa sổ hay chuột. Nhờ vậy kiểm chứng được bằng phép tính tay
+/// thay vì phải kéo chuột thật trên màn hình.
+enum GridSnapper {
+    /// Một ô lưới: toạ độ góc dưới-trái theo toạ độ màn hình.
+    struct Slot {
+        var origin: NSPoint
+        var size: NSSize
+    }
+
+    /// Bố cục lưới cho widget cỡ `size` trên màn hình `visible`.
+    ///
+    /// **Ô đè lên nhau một nửa**: bước nhảy bằng `nửa cỡ widget`, nên widget
+    /// đặt được lệch ra nửa ô — chọn được nhiều chỗ hơn hẳn lưới thưa (bước =
+    /// cả cỡ widget), vốn chỉ cho vài vị trí "bắt vào".
+    ///
+    /// Cộng thêm bốn ô sát mép màn hình — đó là chỗ người dùng hay đặt widget
+    /// nhất. Ô sát mép trùng với ô lưới thì bỏ, tránh hai chỗ chồng nhau.
+    ///
+    /// Mỗi ô đúng bằng `size`. Cỡ này do `WidgetWindow` truyền vào lúc giơ
+    /// lưới nên widget vừa đổi ảnh (đổi tỉ lệ, đổi cỡ) thì ô bám theo ngay —
+    /// không phải kích thước cứng từ lúc dựng.
+    static func slots(widgetSize size: NSSize, visibleFrame vf: NSRect) -> [NSPoint] {
+        let margin: CGFloat = 36
+        guard size.width > 0, size.height > 0 else { return [] }
+        // Widget to hơn vùng dùng được thì không ô nào vừa — trả rỗng để
+        // `armSnapMode` bỏ qua lưới, thay vì vẽ ô tràn ra ngoài màn hình.
+        let spanX = vf.width - margin * 2 - size.width
+        let spanY = vf.height - margin * 2 - size.height
+        guard spanX >= 0, spanY >= 0 else { return [] }
+
+        // Widget nhỏ trên màn hình lớn thì lưới nửa-ô có thể lên hàng trăm ô,
+        // mỗi ô một lớp — vừa nặng vừa rối mắt. Có trần số ô; vượt trần thì
+        // giãn bước nhảy cho tới khi vừa. Khi số ô vừa phải thì giữ nguyên
+        // nửa-ô.
+        let maxCells = 240
+        func count(span: CGFloat, step: CGFloat) -> Int {
+            span <= 0 ? 1 : Int(span / step) + 1
+        }
+        var stepX = size.width / 2
+        var stepY = size.height / 2
+        while count(span: spanX, step: stepX) * count(span: spanY, step: stepY) > maxCells {
+            stepX *= 1.2
+            stepY *= 1.2
+        }
+
+        let nx = count(span: spanX, step: stepX)
+        let ny = count(span: spanY, step: stepY)
+        var out: [NSPoint] = []
+        out.reserveCapacity(nx * ny + 4)
+        for r in 0..<ny {
+            for c in 0..<nx {
+                out.append(NSPoint(
+                    x: vf.minX + margin + CGFloat(c) * stepX,
+                    y: vf.maxY - margin - size.height - CGFloat(r) * stepY))
+            }
+        }
+
+        let edges: [NSPoint] = [
+            NSPoint(x: vf.minX + margin, y: vf.maxY - margin - size.height),
+            NSPoint(x: vf.maxX - margin - size.width, y: vf.maxY - margin - size.height),
+            NSPoint(x: vf.minX + margin, y: vf.minY + margin),
+            NSPoint(x: vf.maxX - margin - size.width, y: vf.minY + margin),
+        ]
+        for p in edges
+        where !out.contains(where: { abs($0.x - p.x) < 0.5 && abs($0.y - p.y) < 0.5 }) {
+            out.append(p)
+        }
+        return out
+    }
+
+    /// Ô gần `origin` nhất — chính là chỗ widget sẽ rơi vào khi thả.
+    ///
+    /// Trả nil khi không có ô nào (widget to hơn màn hình, chẳng hạn).
+    static func nearest(in slots: [NSPoint], to origin: NSPoint) -> Int? {
+        var best: Int?
+        var bd = CGFloat.greatestFiniteMagnitude
+        for (i, p) in slots.enumerated() {
+            let d = hypot(p.x - origin.x, p.y - origin.y)
+            if d < bd { bd = d; best = i }
+        }
+        return best
+    }
+}
+--- FILE: Sources/ImageStore.swift ---
+import AppKit
+import ImageIO
+import CryptoKit
+
+/// Đọc ảnh từ đĩa, tiết kiệm năng lượng và RAM.
+///
+/// Ba tầng, từ nhanh nhất tới chậm nhất:
+///
+///   1. RAM        — vài ảnh vừa xem, LRU giữ `memLimit` ảnh. Lật lại ảnh cũ tức thì.
+///   2. Đĩa cache  — JPEG nhỏ, giải mã ~5ms.
+///   3. Ảnh gốc    — giải mã trên luồng phụ, KHÔNG bao giờ trên luồng chính.
+///
+/// Vì sao tầng 3 phải nằm ngoài luồng chính: ảnh gốc là 3840×2160. Giải mã đầy
+/// đủ tạo buffer 31.6 MB và tốn 0.33s — đo thực tế trên máy này. Làm việc đó
+/// trên luồng chính nghĩa là widget đứng hình 0.33s mỗi lần đổi ảnh.
+///
+/// Vì sao KHÔNG giải mã hết loạt lúc mở app (`prewarm` cũ): 43 ảnh làm CPU
+/// tăng 1.25s và RSS tăng từ 24 MB lên 52 MB — phần lớn là bộ nhớ đã giải phóng
+/// mà malloc không trả lại cho hệ điều hành. Đổi lại tốn đúng mười mili giây
+/// cho lần xem đầu tiên của mỗi ảnh, và chỉ những ảnh thật sự được xem.
+enum ImageStore {
+    static let supported: Set<String> = [
+        "jpg", "jpeg", "png", "heic", "heif", "gif", "tif", "tiff", "bmp", "webp",
+    ]
+
+    /// Mỗi ảnh giữ trong RAM bao nhiêu byte: rộng × cao × 4.
+    /// 768px ngang ≈ 1.3 MB, nên 3 ảnh là ~4 MB.
+    private static let memLimit = 3
+
+    /// Tổng dung lượng cache trên đĩa được phép. 64 MB là dư cho vài trăm ảnh
+    /// ở mức 1280px; vượt ngưỡng thì xoá bản cũ nhất.
+    private static let diskCap: Int64 = 64 * 1024 * 1024
+
+    private static let cacheDir: URL = {
+        let d = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LitePic", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+
+    // MARK: - Đồng bộ
+
+    /// RAM và cache đĩa đều bị đụng từ nhiều luồng (chính + luồng giải mã).
+    private static let lock = NSLock()
+    private static var memCache: [String: NSImage] = [:]
+    private static var memOrder: [String] = []
+    private static var sizeMemo: [String: CGSize] = [:]
+
+    /// Hàng đợi giải mã nối tiếp — chỉ một ảnh được giải mã tại một thời điểm.
+    /// Quan trọng cho RAM: hai ảnh 4K giải mã chồng nhau là 60 MB, một ảnh thì 10.
+    private static let decodeQueue = DispatchQueue(
+        label: "local.litepic.decode", qos: .userInitiated)
+
+    // MARK: - Liệt kê
+
+    /// Liệt kê file ảnh trong các thư mục đã chọn (hỗ trợ nhiều thư mục / nhiều "album").
+    static func files(in folders: [URL]) -> [URL] {
+        let fm = FileManager.default
+        var out: [URL] = []
+        for folder in folders {
+            guard let items = try? fm.contentsOfDirectory(
+                at: folder,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+            ) else { continue }
+            for u in items where supported.contains(u.pathExtension.lowercased()) {
+                out.append(u)
+            }
+        }
+        return out
+    }
+
+    // MARK: - Kích thước gốc
+
+    /// Kích thước pixel gốc, đọc từ header — không giải mã ảnh.
+    ///
+    /// Có ghi nhớ theo đường dẫn: mỗi lần đổi ảnh cần tỉ lệ này TRƯỚC khi biết
+    /// kích thước cửa sổ, và `load()` lại mở đúng file đó lần nữa. Ghi nhớ giúp
+    /// mỗi lần đổi ảnh chỉ mở file một lần thay vì hai.
+    static func pixelSize(of url: URL) -> CGSize? {
+        let k = url.path
+        lock.lock()
+        if let hit = sizeMemo[k] { lock.unlock(); return hit }
+        lock.unlock()
+
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+              w > 0, h > 0
+        else { return nil }
+        let size = CGSize(width: w, height: h)
+
+        lock.lock()
+        if sizeMemo.count > 512 { sizeMemo.removeAll() }   // đừng phình vô hạn
+        sizeMemo[k] = size
+        lock.unlock()
+        return size
+    }
+
+    // MARK: - Tải ảnh
+
+    /// Các mức cache. Yêu cầu hiển thị được làm tròn lên mức gần nhất, nhờ vậy việc làm
+    /// nóng cache ở 2048 cũng phục vụ được các yêu cầu nhỏ hơn (1200px…) — quan trọng,
+    /// vì nếu tên cache mang kích thước riêng thì mỗi lần hiển thị đều lỡ cache và
+    /// phải giải mã lại ảnh 4K gốc.
+    private static let pixelBuckets = [512, 768, 1024, 1280, 1536, 2048, 3072, 4096]
+
+    /// Mức cache phục vụ một yêu cầu hiển thị `want` px — AppController dùng để
+    /// biết mức nào còn cần giữ lại khi dọn cache.
+    static func pixelBucket(for want: CGFloat) -> Int { bucket(for: max(64, want)) }
+
+    private static func bucket(for want: CGFloat) -> Int {
+        for b in pixelBuckets where CGFloat(b) >= want { return b }
+        return pixelBuckets[pixelBuckets.count - 1]
+    }
+
+    /// Trả ảnh ngay nếu đang có trong RAM — không chặn, không giải mã.
+    static func inMemory(_ url: URL, maxPixel: CGFloat) -> NSImage? {
+        let key = "\(cacheKey(for: url))-\(bucket(for: max(64, maxPixel)))"
+        lock.lock()
+        defer { lock.unlock() }
+        if let hit = memCache[key] {
+            memOrder.removeAll { $0 == key }
+            memOrder.append(key)      // chạm lần cuối -> giữ lâu hơn
+            return hit
+        }
+        return nil
+    }
+
+    /// Tải ảnh, gọi `completion` trên luồng chính.
+    ///
+    /// Trả ngay tức thì (không cần bố trí hẹn giờ) nếu ảnh còn trong RAM — đường
+    /// này chiếm đa số lượt bấm nút Next/Previous.
+    static func load(_ url: URL, maxPixel: CGFloat, completion: @escaping (NSImage?) -> Void) {
+        if let hit = inMemory(url, maxPixel: maxPixel) {
+            completion(hit)
+            return
+        }
+        let key = "\(cacheKey(for: url))-\(bucket(for: max(64, maxPixel)))"
+        let file = cacheDir.appendingPathComponent("\(key).jpg")
+        let pixel = bucket(for: max(64, maxPixel))
+
+        decodeQueue.async {
+            // Cache đĩa: JPEG nhỏ, giải mã nhanh. Không cần đụng ảnh gốc.
+            if let hit = NSImage(contentsOf: file) {
+                self.remember(key, hit)
+                DispatchQueue.main.async { completion(hit) }
+                return
+            }
+            // Lạnh: giải mã ảnh gốc — ở đây, không phải trên luồng chính.
+            //
+            // Đo được: mỗi lần giải mã ảnh gốc 4K làm tiến trình tăng ~7 MB
+            // và KHÔNG bao giờ xuống lại, dù ảnh đó sau đó bị bỏ khỏi RAM. Đó là
+            // bộ giải mã JPEG của ImageIO giữ lại bộ đệm giải mã đầy đủ
+            // (3840×2160×4 = 31.6 MB) cho lần đọc kế tiếp cùng file đó.
+            //
+            // `CACHE_RESOLVED_IMAGES` bật thì ImageIO cache lại ảnh đã giải mã
+            // theo đường dẫn — tức là giữ nguyên ảnh 4K trong RAM. Tắt hẳn:
+            // ta đã có cache riêng ở tầng trên, không cần ImageIO nhớ gì thêm.
+            guard let cg = self.decodeThumbnail(of: url, maxPixel: CGFloat(pixel)) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+            self.remember(key, img)
+            self.writeCache(cg, to: file)
+            DispatchQueue.main.async { completion(img) }
+        }
+    }
+
+    // MARK: - Bộ nhớ
+
+    private static func remember(_ key: String, _ img: NSImage) {
+        lock.lock()
+        defer { lock.unlock() }
+        if memCache[key] == nil { memOrder.append(key) }
+        memCache[key] = img
+        // LRU: bỏ ảnh cũ nhất cho tới khi vừa đủ chỗ.
+        while memOrder.count > memLimit {
+            let drop = memOrder.removeFirst()
+            memCache.removeValue(forKey: drop)
+        }
+    }
+
+    /// Xoá toàn bộ bộ nhớ — gọi khi đổi thư mục ảnh.
+    static func clearMemory() {
+        lock.lock()
+        memCache.removeAll()
+        memOrder.removeAll()
+        sizeMemo.removeAll()
+        lock.unlock()
+    }
+
+    // MARK: - Giải mã và ghi cache
+
+    private static func decodeThumbnail(of url: URL, maxPixel: CGFloat) -> CGImage? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform:  true, // tôn trọng EXIF orientation
+            kCGImageSourceThumbnailMaxPixelSize:         maxPixel,
+            kCGImageSourceShouldCacheImmediately:        false,
+            kCGImageSourceShouldCache:                   false,
+        ]
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+    }
+
+    /// Ghi cache bằng chính ImageIO.
+    ///
+    /// Không dùng `NSBitmapImageRep(cgImage:)` vì hàm đó tạo thêm một bản sao
+    /// bitmap đúng kích thước ảnh trước khi encode — thừa ~1.3 MB mỗi lần ghi.
+    ///
+    /// Ghi "public.jpeg" thay vì `UTType.jpeg.identifier`: dùng UTType kéo
+    /// cả framework UniformTypeIdentifiers vào bộ nhớ dù chỉ cần một chuỗi,
+    /// và đo được nó tăng ~8 MB RSS của cả app.
+    private static func writeCache(_ cg: CGImage, to file: URL) {
+        guard let dest = CGImageDestinationCreateWithURL(
+            file as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, cg, [
+            kCGImageDestinationLossyCompressionQuality: 0.82,
+        ] as CFDictionary)
+        if !CGImageDestinationFinalize(dest) {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    /// Khoá cache theo đường dẫn + mtime + size: sửa ảnh gốc thì tự sinh cache mới.
+    private static func cacheKey(for url: URL) -> String {
+        let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let mtime = Int(v?.contentModificationDate?.timeIntervalSince1970 ?? 0)
+        let size = v?.fileSize ?? 0
+        let raw = "\(url.path)|\(mtime)|\(size)"
+        let hex = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+        return String(hex.prefix(16))
+    }
+
+    // MARK: - Dọn cache
+
+    /// Xoá cache không còn dùng.
+    ///
+    /// Đổi kích thước widget hay hạ chất lượng là đổi mức cache, mà mỗi mức là
+    /// một bộ file riêng. Không dọn thì cache phình vô hạn — đo được 4 mức cùng
+    /// tồn tại từ các lần đổi cấu hình, tốn gấp đôi dung lượng cần thiết.
+    /// `keepPixels == nil` nghĩa là giữ tất cả (chỉ còn chặn trần dung lượng).
+    static func pruneCache(keepPixels pixels: Int?) {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: cacheDir,
+            includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]
+        ) else { return }
+
+        var keep: [URL] = []
+        for u in items {
+            if let p = pixels, !u.lastPathComponent.hasSuffix("-\(p).jpg") {
+                try? fm.removeItem(at: u)          // mức cache không còn dùng
+            } else {
+                keep.append(u)
+            }
+        }
+
+        var sized: [(url: URL, size: Int, date: Date)] = []
+        var total: Int64 = 0
+        for u in keep {
+            let v = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let s = Int(v?.fileSize ?? 0)
+            total += Int64(s)
+            sized.append((u, s, v?.contentModificationDate ?? .distantPast))
+        }
+        guard total > diskCap else { return }
+        for e in sized.sorted(by: { $0.date < $1.date }) {
+            guard total > diskCap else { break }
+            try? fm.removeItem(at: e.url)
+            total -= Int64(e.size)
+        }
+    }
+
+    /// Dung lượng cache hiện có (byte).
+    static func cacheSize() -> Int64 {
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: cacheDir, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        return items.reduce(Int64(0)) { sum, u in
+            sum + Int64((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        }
+    }
+
+    static func clearCache() {
+        clearMemory()
+        try? FileManager.default.removeItem(at: cacheDir)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+    }
+}
+
+--- FILE: Sources/LaunchAtLogin.swift ---
+import AppKit
+
+/// Tự chạy cùng macOS khi đăng nhập.
+///
+/// Vì sao KHÔNG dùng `SMAppService.mainApp` (dù API này gọn hơn nhiều):
+/// nó từ chối app ký ad-hoc. Đã kiểm chứng — app build cục bộ của LitePic gọi
+/// `register()` trả về `Operation not permitted`. `SMAppService` cần chữ ký
+/// Developer ID hợp lệ, còn LitePic build tại chỗ bằng `codesign --sign -`.
+///
+/// Dùng LaunchAgent plist thay thế. Cách này chỉ GHI FILE, không gọi launchd
+/// ngay — có chủ đích:
+///
+///   - launchd nạp `~/Library/LaunchAgents` khi đăng nhập, nên file là đủ.
+///   - Nếu gọi `launchctl bootstrap` lúc này thì launchd sẽ khởi chạy MỘT
+///     instance thứ hai, trong khi bản người dùng đang bấm menu vẫn chạy —
+///     hai instance cùng tranh một ô menu bar.
+///   - Đổi lại tính năng có hiệu lực từ lần đăng nhập kế tiếp. Đây là chuyện
+///     bình thường với mọi ứng dụng loại này.
+enum LaunchAtLogin {
+    private static let label = "local.litepic.widget"
+
+    private static var plistURL: URL {
+        let lib = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        let dir = lib.appendingPathComponent("LaunchAgents", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(label).plist")
+    }
+
+    /// Đường dẫn binary — launchd chạy chính file này, không qua `open`.
+    private static var executable: String {
+        Bundle.main.bundlePath + "/Contents/MacOS/LitePic"
+    }
+
+    /// Đang đăng ký tự chạy không.
+    ///
+    /// Phải kiểm tra cả nội dung plist, không chỉ "file tồn tại": mỗi lần build
+    /// lại app có thể nằm ở đường dẫn khác, plist cũ sẽ trỏ vào chỗ không có
+    /// — mà vẫn hiện "đang bật" trong menu.
+    static var isEnabled: Bool {
+        guard let data = try? Data(contentsOf: plistURL),
+              let pl = try? PropertyListSerialization.propertyList(
+                from: data, options: [], format: nil) as? [String: Any],
+              let args = pl["ProgramArguments"] as? [String]
+        else { return false }
+        return args.first == executable
+            && FileManager.default.isExecutableFile(atPath: executable)
+    }
+
+    /// Bật/tắt tự chạy. Trả về thông báo lỗi nếu thất bại.
+    @discardableResult
+    static func set(_ on: Bool) -> String? {
+        let fm = FileManager.default
+        let url = plistURL
+
+        if !on {
+            // Gỡ job đã nạp nếu có (trường hợp bật rồi tắt cùng phiên đăng nhập).
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            p.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+            do { try fm.removeItem(at: url) } catch {
+                Diag.log("xoa plist that bai: \(error)")
+                return "Không xoá được: \(error.localizedDescription)"
+            }
+            return nil
+        }
+
+        guard fm.isExecutableFile(atPath: executable) else {
+            return "Chưa thấy app tại \(executable)."
+        }
+
+        let plist: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": [executable],
+            "RunAtLoad": true,
+            // Như app bình thường: không phải daemon nền, cũng không bị hệ
+            // thống kéo chậm khi người dùng đang bận việc.
+            "ProcessType": "Interactive",
+        ]
+        do {
+            let data = try PropertyListSerialization.data(
+                fromPropertyList: plist, format: .xml, options: 0)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            Diag.log("ghi plist that bai: \(error)")
+            return "Không ghi được: \(error.localizedDescription)"
+        }
+        Diag.log("LaunchAtLogin: da ghi \(url.path)")
+        return nil
+    }
+}
+
+--- FILE: Sources/Settings.swift ---
+import AppKit
+
+/// Cách widget tính kích thước cửa sổ.
+enum SizeMode: Int, CaseIterable {
+    case fitImage  // cả hai cạnh bám tỉ lệ ảnh, co về cạnh lớn nhất
+    case fitWidth  // cống chiều rộng, chiều cao bám tỉ lệ ảnh
+    case fixed     // kích thước cứng, ảnh co vừa
+
+    var title: String {
+        switch self {
+        case .fitImage: return "Tự động theo ảnh"
+        case .fitWidth: return "Cống chiều rộng"
+        case .fixed:    return "Kích thước cứng"
+        }
+    }
+}
+
+/// Tầng hiển thị của widget.
+///
+/// Vì sao cần: widget đặt ở tầng `desktop + 20` (-2147483603) thì **luôn nằm dưới
+/// mọi cửa sổ app** (tầng 0). Chỉ cần một cửa sổ trình duyệt phủ qua vùng đó là
+/// mọi cú click rơi vào cửa sổ kia, widget không bao giờ nhận được sự kiện chuột —
+/// biểu hiện là "bấm vào widget thì dính desktop".
+///
+/// Đây là hành vi đúng như widget macOS, nhưng khó chịu khi màn hình bị phủ kín,
+/// nên mặc định đặt là `floating`.
+enum LevelMode: Int, CaseIterable {
+    case desktop   // trên wallpaper, dưới cửa sổ app (giống widget macOS)
+    case floating  // nổi trên cửa sổ app — luôn bấm/kéo được
+
+    var title: String {
+        switch self {
+        case .desktop:  return "Trên wallpaper (dưới app)"
+        case .floating: return "Luôn nổi (dễ bấm)"
+        }
+    }
+}
+
+/// Cách ảnh lấp đầy khung.
+enum FillMode: Int, CaseIterable {
+    case fit    // vừa khung, giữ nguyên tỉ lệ, có nền trống 2 bên
+    case fill   // cắt bớt viền để tràn kín khung
+
+    var title: String {
+        switch self {
+        case .fit:  return "Vừa khung (giữ tỉ lệ)"
+        case .fill: return "Cắt đầy khung"
+        }
+    }
+}
+
+/// Toàn bộ tuỳ chọn nằm trong UserDefaults — không file cấu hình phức tạp.
+final class Settings {
+    static let shared = Settings()
+    private let d = UserDefaults.standard
+
+    private enum K {
+        static let folders       = "folders"
+        static let interval      = "interval"
+        static let randomOn      = "randomInterval"
+        static let minInterval   = "minInterval"
+        static let maxInterval   = "maxInterval"
+        static let sizeMode      = "sizeMode"
+        static let width         = "width"
+        static let height        = "height"
+        static let maxEdge       = "maxEdge"
+        static let opacity       = "opacity"
+        static let snapToGrid   = "snapToGrid"
+        static let renderScale  = "renderScale"
+        static let fillMode     = "fillMode"
+        static let levelMode    = "levelMode"
+        static let changeOnWake = "changeOnWake"
+        static let pinned     = "pinnedURL"
+        static let frameStyle = "frameStyle"
+        static let posX          = "posX"
+        static let posY          = "posY"
+    }
+
+    // MARK: - Nguồn ảnh
+
+    /// Thư mục ảnh.
+    ///
+    /// `folderPaths` là nguồn sự thật về thứ tự và thành phần. Bookmark chỉ dùng
+    /// để sửa đường dẫn khi thư mục đã bị di chuyển — không bao giờ thay thế danh
+    /// sách, vì nếu thay thế thì "Bỏ thư mục" sẽ không bao giờ có tác dụng.
+    var folders: [URL] {
+        let paths = folderPaths
+        let located = Bookmarks.resolve(paths)
+        return paths.map { located[$0] ?? URL(fileURLWithPath: $0) }
+    }
+
+    var folderPaths: [String] {
+        get { d.stringArray(forKey: K.folders) ?? [] }
+        set {
+            d.set(newValue, forKey: K.folders)
+            Bookmarks.save(newValue.map { URL(fileURLWithPath: $0) })
+        }
+    }
+
+    /// Thư mục đã chọn nhưng hiện không đọc được (ổ chưa mount, thư mục đã xoá).
+    var missingFolders: [String] { Bookmarks.missing(folderPaths) }
+
+    // MARK: - Tần suất đổi ảnh
+
+    var interval: TimeInterval {
+        get { d.object(forKey: K.interval) == nil ? 30 : d.double(forKey: K.interval) }
+        set { d.set(newValue, forKey: K.interval) }
+    }
+
+    var randomInterval: Bool {
+        get { d.bool(forKey: K.randomOn) }
+        set { d.set(newValue, forKey: K.randomOn) }
+    }
+
+    var minInterval: TimeInterval {
+        get { d.object(forKey: K.minInterval) == nil ? 15 : d.double(forKey: K.minInterval) }
+        set { d.set(newValue, forKey: K.minInterval) }
+    }
+
+    var maxInterval: TimeInterval {
+        get { d.object(forKey: K.maxInterval) == nil ? 300 : d.double(forKey: K.maxInterval) }
+        set { d.set(newValue, forKey: K.maxInterval) }
+    }
+
+    // MARK: - Hiển thị
+
+    var sizeMode: SizeMode {
+        get { SizeMode(rawValue: d.integer(forKey: K.sizeMode)) ?? .fitImage }
+        set { d.set(newValue.rawValue, forKey: K.sizeMode) }
+    }
+
+    var width: CGFloat {
+        get { d.object(forKey: K.width) == nil ? 480 : CGFloat(d.double(forKey: K.width)) }
+        set { d.set(Double(newValue), forKey: K.width) }
+    }
+
+    var height: CGFloat {
+        get { d.object(forKey: K.height) == nil ? 480 : CGFloat(d.double(forKey: K.height)) }
+        set { d.set(Double(newValue), forKey: K.height) }
+    }
+
+    /// Cạnh dài tối đa cho chế độ fitImage.
+    var maxEdge: CGFloat {
+        get { d.object(forKey: K.maxEdge) == nil ? 600 : CGFloat(d.double(forKey: K.maxEdge)) }
+        set { d.set(Double(newValue), forKey: K.maxEdge) }
+    }
+
+    var opacity: CGFloat {
+        get { d.object(forKey: K.opacity) == nil ? 1 : CGFloat(d.double(forKey: K.opacity)) }
+        set { d.set(Double(newValue), forKey: K.opacity) }
+    }
+
+    /// Bật thì widget luôn "hít" vào ô lưới gần nhất khi thả — không đặt tùy ý.
+    var snapToGrid: Bool {
+        get { d.object(forKey: K.snapToGrid) == nil ? true : d.bool(forKey: K.snapToGrid) }
+        set { d.set(newValue, forKey: K.snapToGrid) }
+    }
+
+    /// Hệ số render: 2 = sắc nét trên Retina nhưng giải mã nặng hơn ~4 lần;
+    /// 1 = nhẹ hơn nhiều, đổi lại hơi mềm trên màn Retina.
+    var renderScale: CGFloat {
+        get { d.object(forKey: K.renderScale) == nil ? 2 : CGFloat(d.double(forKey: K.renderScale)) }
+        set { d.set(Double(newValue), forKey: K.renderScale) }
+    }
+
+    /// Chỉ có tác dụng ở chế độ *Kích thước cứng* — hai chế độ còn lại tính
+    /// kích thước cửa sổ theo đúng tỉ lệ ảnh nên không bao giờ thừa hay thiếu.
+    var fillMode: FillMode {
+        get { FillMode(rawValue: d.integer(forKey: K.fillMode)) ?? .fit }
+        set { d.set(newValue.rawValue, forKey: K.fillMode) }
+    }
+
+    var levelMode: LevelMode {
+        get { LevelMode(rawValue: d.integer(forKey: K.levelMode)) ?? .floating }
+        set { d.set(newValue.rawValue, forKey: K.levelMode) }
+    }
+
+    /// Đổi ảnh mỗi lần thức Mac khỏi chế độ ngủ.
+    var changeOnWake: Bool {
+        get { d.bool(forKey: K.changeOnWake) }
+        set { d.set(newValue, forKey: K.changeOnWake) }
+    }
+
+    var frameStyle: FrameStyle {
+        get { FrameStyle(rawValue: d.integer(forKey: K.frameStyle)) ?? .shadow }
+        set { d.set(newValue.rawValue, forKey: K.frameStyle) }
+    }
+
+    /// Ảnh đang ghim — không bị đổi bởi timer cho tới khi bỏ ghim.
+    var pinnedURL: String? {
+        get { d.string(forKey: K.pinned) }
+        set { d.set(newValue, forKey: K.pinned) }
+    }
+
+    var savedOrigin: NSPoint? {
+        get {
+            guard d.object(forKey: K.posX) != nil, d.object(forKey: K.posY) != nil else { return nil }
+            return NSPoint(x: CGFloat(d.double(forKey: K.posX)),
+                           y: CGFloat(d.double(forKey: K.posY)))
+        }
+        set {
+            guard let newValue else { return }
+            d.set(Double(newValue.x), forKey: K.posX)
+            d.set(Double(newValue.y), forKey: K.posY)
+        }
+    }
+}
+--- FILE: Sources/WidgetControls.swift ---
+import AppKit
+
+/// Thanh nút nhỏ trên widget: ảnh trước / kế tiếp / ghim.
+///
+/// Các nút nằm trong một hàng dọc ở góc trên phải, chỉ hiện khi rê chuột vào
+/// widget (hoặc lúc kéo) — giống cách widget macOS ẩn điều khiển khi rời chuột.
+final class WidgetControls: NSView {
+    var onPrev: (() -> Void)?
+    var onNext: (() -> Void)?
+    var onTogglePin: (() -> Void)?
+
+    /// Có đang ghim ảnh hiện tại không — quyết định màu nút ghim.
+    var isPinned = false {
+        didSet { pinBtn.contentTintColor = isPinned ? .systemYellow : .white }
+    }
+
+    private let prevBtn = NSButton()
+    private let nextBtn = NSButton()
+    private let pinBtn = NSButton()
+
+    /// Kích thước nút — nhỏ nhất có thể mà vẫn bấm được bằng chuột.
+    private static let side: CGFloat = 26
+    private static let gap: CGFloat = 6
+    private static let pad: CGFloat = 8
+
+    private var origin = CGPoint.zero
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        configure(prevBtn, "chevron.left", #selector(pressPrev))
+        configure(nextBtn, "chevron.right", #selector(pressNext))
+        configure(pinBtn, "pin", #selector(pressPin))
+        addSubview(prevBtn)
+        addSubview(nextBtn)
+        addSubview(pinBtn)
+    }
+
+    required init?(coder: NSCoder) { fatalError("khong dung") }
+
+    private func configure(_ b: NSButton, _ symbol: String, _ sel: Selector) {
+        b.wantsLayer = true
+        b.bezelStyle = .texturedRounded
+        b.isBordered = false
+        b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        b.contentTintColor = .white
+        b.target = self
+        b.action = sel
+        b.setButtonType(.momentaryChange)
+    }
+
+    /// Vị trí trong hệ toạ độ của widget (widget đặt góc trên phải).
+    func place(inside size: NSSize, offset: CGPoint) {
+        let w = Self.side, gap = Self.gap
+        origin = CGPoint(x: offset.x - w - gap, y: offset.y + size.height - w - gap)
+        layoutButtons()
+    }
+
+    private func layoutButtons() {
+        prevBtn.frame = CGRect(x: 0, y: 0, width: Self.side, height: Self.side)
+        nextBtn.frame = CGRect(x: prevBtn.frame.maxX + Self.gap, y: 0,
+                               width: Self.side, height: Self.side)
+        pinBtn.frame = CGRect(x: nextBtn.frame.maxX + Self.gap, y: 0,
+                              width: Self.side, height: Self.side)
+        let total = pinBtn.frame.maxX
+        frame = CGRect(origin: origin, size: NSSize(width: total, height: Self.side))
+        // Nền nửa trong suốt để nút đọc được trên cả ảnh sáng lẫn tối.
+        wantsLayer = true
+        layer?.cornerRadius = Self.side / 2
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
+    }
+
+    @objc private func pressPrev() { onPrev?() }
+    @objc private func pressNext() { onNext?() }
+    @objc private func pressPin() { onTogglePin?() }
+}
+--- FILE: Sources/WidgetWindow.swift ---
+import AppKit
+
+/// Kết quả của một lần nhấn chuột trái trên widget.
+enum DropResult {
+    case click  // bấm rồi thả, không di chuyển
+    case free   // kéo ngay: đặt tự do
+    case snap   // giữ đủ lâu rồi kéo/thả: khe vào lưới
+}
+
+/// View phủ kín cửa sổ widget: nhận chuột để kéo, chuột phải để mở menu,
+/// rê chuột để hiện nút, và nhận file thả từ Finder.
+///
+/// Phần xử lý nhấn – giữ – kéo – thả nằm ở `DragSession`; class này chỉ làm
+/// nhiệm vụ chuyển sự kiện của AppKit sang callback.
+final class DraggableView: NSView {
+    /// Menu hiện khi bấm chuột phải — AppController gắn vào sau init.
+    var contextMenu: NSMenu?
+    /// Báo rê chuột vào/ra widget để hiện/ẩn nút điều khiển.
+    var onHover: ((Bool) -> Void)?
+    /// Người dùng thả file/thư mục từ Finder vào widget.
+    var onFilesDropped: (([URL]) -> Void)?
+
+    /// Phiên kéo hiện tại.
+    let session = DragSession()
+
+    private var tracking: NSTrackingArea?
+    private var hoverPushed = false
+
+    var isPressed: Bool { session.isPressed }
+    var isDragging: Bool { session.isDragging }
+
+    /// Mấu chốt để kéo hoạt động: `ImageCanvas` phủ kín toàn bộ cửa sổ, nên mặc
+    /// định hit-test trả về chính imageView và các sự kiện chuột không bao giờ
+    /// tới `DraggableView`. Mọi điểm trong biên đều trả về `self`.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        session.begin(in: self, event: event)
+    }
+
+    // MARK: - Kéo thả từ Finder
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        // Thả đúng lên cụm nút thì không nhận — nếu không, thả ảnh lên nút
+        // "giai tiếp" sẽ bị hiểu thành đổi ảnh thay vì nhận file.
+        if let c = subviews.compactMap({ $0 as? WidgetControls }).first,
+           !c.isHidden,
+           c.frame.contains(convert(sender.draggingLocation, from: nil)) {
+            return []
+        }
+        return .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self]) as? [URL] ?? []
+        guard !urls.isEmpty else { return false }
+        onFilesDropped?(urls)
+        return true
+    }
+
+    // MARK: - Menu và rê chuột
+
+    /// Bấm chuột phải: AppKit tự gọi hàm này và hiện menu trả về.
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard let m = contextMenu else { return }
+        NSMenu.popUpContextMenu(m, with: event, for: self)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let area = NSTrackingArea(rect: bounds,
+                                 options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect],
+                                 owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover?(true)
+        guard !isPressed, !isDragging, !hoverPushed else { return }
+        NSCursor.pointingHand.push()
+        hoverPushed = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover?(false)
+        guard hoverPushed else { return }
+        // Trong lúc kéo, cửa sổ trượt dưới con trỏ đứng yên cũng sinh ra
+        // entered/exited — bỏ qua để không làm lệch ngăn xếp cursor.
+        guard !isPressed, !isDragging else { return }
+        popHoverCursorIfNeeded()
+    }
+
+    /// Trả con trỏ rê nếu đang giữ. Tách riêng vì `DragSession` cần gọi lúc
+    /// kết thúc một lần nhấn, khi `mouseExited` có thể đã không tới.
+    func popHoverCursorIfNeeded() {
+        guard hoverPushed else { return }
+        NSCursor.pop()
+        hoverPushed = false
+    }
+}
+
+/// Lớp phủ trong suốt hiện toàn bộ ô lưới khi đang ở chế độ lưới, để thấy rõ
+/// widget sẽ rơi vào chỗ nào thay vì đoán mò.
+final class GridOverlay {
+    private let window: NSWindow
+    private let host = NSView()
+    private var slotViews: [NSView] = []
+    /// Ô đang sáng — để lần tới chỉ vẽ lại đúng ô vừa bỏ sáng và ô vừa sáng.
+    private var highlighted: Int?
+
+    init(level: NSWindow.Level) {
+        window = NSWindow(contentRect: .zero, styleMask: [.borderless],
+                          backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.level = level
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        window.ignoresMouseEvents = true
+        host.wantsLayer = true
+        window.contentView = host
+    }
+
+    var isVisible: Bool { window.isVisible }
+
+    /// Bám theo tầng của widget + 1 để lưới luôn nằm ngay trên nó.
+    func setLevel(_ base: NSWindow.Level) { window.level = base + 1 }
+
+    func show(slots: [NSPoint], size: NSSize, corner: CGFloat, on screen: NSScreen) {
+        for v in host.subviews { v.removeFromSuperview() }
+        highlighted = nil
+        slotViews = slots.map { origin in
+            let v = NSView(frame: NSRect(x: origin.x - screen.frame.minX,
+                                         y: origin.y - screen.frame.minY,
+                                         width: size.width, height: size.height))
+            v.wantsLayer = true
+            v.layer?.cornerRadius = corner
+            v.layer?.cornerCurve = .continuous
+            v.layer?.borderWidth = 1.5
+            v.layer?.borderColor = NSColor.white.withAlphaComponent(0.5).cgColor
+            v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+            host.addSubview(v)
+            return v
+        }
+        window.setFrame(screen.frame, display: true)
+        window.orderFrontRegardless()
+        // `display: true` trên đã đủ, nhưng `orderFrontRegardless` không bảo đảm
+        // vẽ lại khi cửa sổ đã hiện sẵn từ trước. Gọi display rõ ràng để chắc.
+        window.displayIfNeeded()
+    }
+
+    /// Tô sáng ô đang ngắm.
+    ///
+    /// Chỉ chạm vào tối đa 2 lớp thay vì cả 8. Bản cũ lặp qua toàn bộ ô và đặt
+    /// lại `borderWidth`/`borderColor`/`backgroundColor` cho từng ô — mỗi lần
+    /// đặt là một lần lớp phải vẽ lại. Hàm này được gọi theo MỌI sự kiện rê
+    /// chuột trong lúc kéo chế độ lưới, tức hàng trăm lần mỗi lần kéo.
+    func highlight(index: Int?) {
+        if let was = highlighted, was != index {
+            paint(slotViews[was], on: false)
+        }
+        if let now = index, slotViews.indices.contains(now) {
+            paint(slotViews[now], on: true)
+        }
+        highlighted = index
+    }
+
+    private func paint(_ v: NSView, on: Bool) {
+        guard let l = v.layer else { return }
+        l.borderWidth = on ? 2.5 : 1.5
+        l.borderColor = on
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.white.withAlphaComponent(0.5).cgColor
+        l.backgroundColor = on
+            ? NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
+            : NSColor.white.withAlphaComponent(0.07).cgColor
+    }
+
+    func hide() {
+        highlighted = nil
+        window.orderOut(nil)
+    }
+}
+
+/// Toan cảnh vẽ ảnh — tự vẽ trong `draw(_:)` thay vì đặt `layer.contents` tay.
+///
+/// VÌ SAO KHÔNG DÙNG `NSImageView`: `layer.contents` là ô nhớ do AppKit quản
+/// lý. Mỗi lần AppKit vẽ lại view (rất dễ xảy ra khi lớp cha đổi transform —
+/// tức lúc widget "nâng" lên khi bạn giữ chuột), `draw()` của `NSImageView`
+/// chạy với không có `image` và **xoá sạch `contents`**. Widget mất trắng: cửa
+/// sổ vẫn còn, vẫn bấm và chuột phải được, nhưng không còn gì để vẽ — và chỉ
+/// tới lần đổi ảnh kế tiếp mới hiện lại.
+///
+/// Tự vẽ trong `draw(_:)` thì AppKit vẽ lại bao nhiêu lần cũng ra đúng ảnh.
+/// Đổi lại là mỗi lần vẽ lại phải tự tính phép vỉa cắt, và AppKit tự lo phần
+/// Retina nên không cần `contentsScale` đặt tay nữa.
+///
+/// Bo góc cũng vẽ tại đây, **không** dùng `layer.cornerRadius` + `masksToBounds`:
+/// khi lớp cha có transform (đúng lúc widget "nâng" lên khi giữ chuột) thì cái
+/// khoén bo của lớp con hay bị mất — chỉ một góc thoát được, ba góc thành vuông.
+/// Cắt trong `draw` thì bo góc là một phần của nét vẽ nên luôn bền.
+final class ImageCanvas: NSView {
+    var image: NSImage? { didSet { needsDisplay = true } }
+    /// Phủ kín và cắt bớt phần thừu, thay vì vừa khung giữ nguyên tỉ lệ.
+    var fill = false { didSet { needsDisplay = true } }
+    /// Bán kính bo góc, vẽ tay trong `draw(_:)`.
+    var cornerRadius: CGFloat = 0 { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let img = image else { return }
+        let sz = img.size
+        guard sz.width > 0, sz.height > 0 else { return }
+        let r = bounds
+        if cornerRadius > 0 {
+            NSBezierPath(roundedRect: r, xRadius: cornerRadius,
+                         yRadius: cornerRadius).addClip()
+        }
+        // `isFlipped` nên `midY` của `bounds` vẫn là tâm — tính tâm là đủ, khỏi
+        // phải nhớ chiều trục.
+        let k = fill ? max(r.width / sz.width, r.height / sz.height)
+                     : min(r.width / sz.width, r.height / sz.height)
+        let target = NSRect(x: r.midX - sz.width * k / 2,
+                            y: r.midY - sz.height * k / 2,
+                            width: sz.width * k, height: sz.height * k)
+        img.draw(in: target, from: .zero, operation: .copy, fraction: 1,
+                 respectFlipped: true, hints: nil)
+    }
+}
+
+/// Cửa sổ widget: bo tròn, có bóng, kéo tự do hoặc giữ 2s để khe lưới.
+final class WidgetWindow {
+    private let settings = Settings.shared
+    let window: NSWindow
+    private let container: DraggableView
+    private let imageView: ImageCanvas
+    /// Lớp ảnh thứ hai, chồm lên lớp đầu — dùng để chuyển ảnh mềm.
+    private let topView: ImageCanvas
+    private let overlay = GridOverlay(level: NSWindow.Level(
+        rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 21))
+
+    private static let desktopLevel: NSWindow.Level = {
+        NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 20)
+    }()
+
+    /// Tầng thực tế đang dùng — `floating` cao hơn cửa sổ app (0) nên luôn bấm được.
+    private var activeLevel: NSWindow.Level {
+        switch settings.levelMode {
+        case .desktop:  return Self.desktopLevel
+        case .floating: return .floating
+        }
+    }
+
+    private let controls = WidgetControls()
+    private var imageSize = NSSize(width: 400, height: 300)
+    /// Ảnh đang hiện, để mở trong Finder.
+    private var currentURL: URL?
+    /// Ảnh đang hiện. Giữ riêng vì `imageView.image` để trống — phần vẽ do
+    /// layer đảm nhiệm (xem `refreshImageLayer`).
+    private var currentImage: NSImage?
+    private var settled = false
+
+    /// Số thứ tự lần hiện ảnh. Lần mới hơn làm lần cũ mất hiệu lực — cần khi
+    /// người dùng bấm ‹ › liên tục trong lúc bộ giải mã còn đang chạy, nếu không
+    /// ảnh sẽ về đúng thứ tự ngược với nút đã bấm.
+    private var showToken = 0
+
+    /// Khoảng trống chừa quanh ảnh cho khung hiện tại.
+    private var frameInset: CGFloat { settings.frameStyle.inset }
+    private var frameBottom: CGFloat { settings.frameStyle.extraBottom }
+    private var framePad: CGFloat { settings.frameStyle.pad }
+    private var activeSlots: [NSPoint] = []
+    private weak var activeScreen: NSScreen?
+
+    /// Đang giữ chuột hoặc đang kéo — AppController hoãn đổi ảnh lúc này để
+    /// cửa sổ không bị giật khỏi tay người dùng.
+    var busy: Bool { container.isPressed || container.isDragging }
+
+    init() {
+        let view = DraggableView(frame: NSRect(x: 0, y: 0, width: 440, height: 340))
+        container = view
+
+        let w = NSWindow(contentRect: view.frame, styleMask: [.borderless],
+                         backing: .buffered, defer: false)
+        window = w
+
+        // Vị trí thật do `layout()` đặt; ở đây chỉ cần một khung tạm cho tới lúc đó.
+        let iv = ImageCanvas(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        iv.autoresizingMask = []
+        iv.wantsLayer = true
+        iv.layer?.opacity = 0      // lớp dưới: luôn trong suốt
+        imageView = iv
+
+        // Lớp trên: chỉ hiện khi đang chuyển ảnh. Hai lớp chồng nhau là cách
+        // crossfade rẻ nhất — chỉ animate `opacity`, không đụng ảnh.
+        let ivTop = ImageCanvas(frame: iv.frame)
+        ivTop.autoresizingMask = []
+        ivTop.wantsLayer = true
+        ivTop.layer?.opacity = 1
+        topView = ivTop
+
+        w.contentView = view
+        view.addSubview(iv)
+        view.addSubview(topView)
+        controls.isHidden = true
+        view.addSubview(controls)
+
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.hasShadow = false
+        w.level = activeLevel
+        w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        w.hidesOnDeactivate = false
+        w.alphaValue = settings.opacity
+        w.ignoresMouseEvents = false
+        w.orderOut(nil)
+
+        let s = view.session
+        s.onDrag = { [weak self] o in self?.dragFree(to: o) }
+        s.onSnapDrag = { [weak self] o in self?.dragSnapped(to: o) }
+        s.onDrop = { [weak self] r in self?.finishDrop(r) }
+        s.onHint = { [weak self] in self?.holdHint() }
+        s.onHintCancel = { [weak self] in self?.cancelHoldHint() }
+        s.onArmed = { [weak self] in self?.armSnapMode() }
+        // Chuột có thể đã ra ngoài view lúc thả — đồng bộ lại con trỏ rê.
+        s.onEnd = { [weak view] in
+            guard let v = view, let w = v.window,
+                  !v.bounds.contains(v.convert(w.convertPoint(fromScreen: NSEvent.mouseLocation),
+                                                from: nil)) else { return }
+            v.popHoverCursorIfNeeded()
+        }
+        view.onHover = { [weak self] hovering in
+            guard let self else { return }
+            self.container.isHidden = false
+            self.controls.isHidden = !hovering
+        }
+        s.onDoubleClick = { [weak self] in self?.revealCurrentInFinder() }
+        view.registerForDraggedTypes([.fileURL])
+
+        applyAppearance()
+        overlay.setLevel(activeLevel)
+        restorePosition()
+        layout()
+    }
+
+    /// Menu chuột phải trên widget. AppController gắn menu riêng (không dùng
+    /// chung instance với menu thanh menu để tránh xung đột hiển thị).
+    func setContextMenu(_ menu: NSMenu?) { container.contextMenu = menu }
+
+    // MARK: - Ngoại hình
+
+    private func applyAppearance() {
+        let f = settings.frameStyle
+        let r = f.imageCorner
+
+        // Lớp ngoài giữ vai trò nền: KHÔNG bo góc, KHÔNG cắt. Bo gốc và cắt là
+        // việc của imageView. Nếu bo cả lớp ngoài thì bóng sẽ ôm theo mép cửa
+        // sổ — tức là rộng hơn ảnh, nhìn ra ngay một dải tối quanh ảnh.
+        container.layer?.cornerRadius = 0
+        container.layer?.cornerCurve = .continuous
+        container.layer?.masksToBounds = false
+        container.layer?.shadowColor = NSColor.black.cgColor
+        container.layer?.shadowOpacity = f.shadowOpacity
+        container.layer?.shadowRadius = 14
+        container.layer?.shadowOffset = CGSize(width: 0, height: -6)
+
+        // Bo góc do `ImageCanvas` tự cắt trong `draw(_:)` — đặt `cornerRadius` /
+        // `masksToBounds` trên lớp thì không bền: lúc lớp cha có transform (widget
+        // "nâng" lên khi giữ chuột) thì ba góc mất bo, chỉ góc dưới-trái còn.
+        imageView.cornerRadius = r
+        topView.cornerRadius = r
+    }
+
+    /// Đổ ảnh vào lớp theo chế độ điền đã chọn.
+    ///
+    /// `ImageCanvas` tự tính phép vỉa cắt trong `draw(_:)` nên ở đây chỉ cần
+    /// tra ảnh vào và bảo nó vẽ lại. Phần Retina do AppKit lo trong `draw`.
+    private func refreshImageLayer() {
+        setContents(currentImage, on: imageView)
+        imageView.layer?.opacity = 1
+        topView.layer?.opacity = 0
+    }
+
+    private func setContents(_ img: NSImage?, on v: ImageCanvas) {
+        guard let img else { return }
+        v.image = img
+        v.fill = (settings.fillMode == .fill)
+        v.needsDisplay = true
+    }
+
+    /// Chuyển ảnh mềm: ảnh mới nằm ở lớp đang mờ, lớp cũ mờ dần.
+    ///
+    /// Chỉ animate `opacity` — không đụng `contents`, nên CoreAnimation không
+    /// phải rasterize lại gì cả. Đo được ~9ms CPU mỗi lần, không đáng kể so
+    /// với 30 giây giữa hai lần đổi ảnh.
+    private func crossfade(to img: NSImage) {
+        // Ảnh đang hiện nằm ở lớp nào? Lớp còn lại là lớp dưới, đang trong suốt.
+        let topVisible = (topView.layer?.opacity ?? 0) > 0.5
+        let under = topVisible ? imageView : topView
+        let over  = topVisible ? topView  : imageView
+
+        // Đặt ảnh mới vào lớp dưới rồi làm nó mờ dần lên.
+        setContents(img, on: under)
+        fade(under, to: 1)
+        fade(over, to: 0)
+    }
+
+    /// Mờ dần một lớp, bằng `CABasicAnimation` tường minh.
+    ///
+    /// Không dùng `animator().layer?.opacity`: thuộc tính CALayer tự animate
+    /// theo "implicit animation" của CoreAnimation, không theo
+    /// `NSAnimationContext`, nên thời lượng và easing không kiểm soát được.
+    /// Rõ hơn nữa, phải trộn `view.alphaValue` và `layer.opacity` là hỏng —
+    /// hai thứ nhân với nhau.
+    private func fade(_ view: ImageCanvas, to value: Float) {
+        guard let l = view.layer else { return }
+        l.removeAnimation(forKey: "fade")
+        // Lấy giá trị đang hiển thị trên màn hình, không phải giá trị model —
+        /// nếu không, lần fade thứ hai sẽ nhảy về 0 rồi mới mờ lên.
+        let from = l.presentation()?.opacity ?? l.opacity
+        if abs(from - value) < 0.001 { return }
+
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = from
+        a.toValue = value
+        a.duration = 0.30
+        a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        l.add(a, forKey: "fade")
+
+        // Giá trị model phải khớp ngay, nếu không animation chỉ chạy một lần.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        l.opacity = value
+        CATransaction.commit()
+    }
+
+    private func lift(_ scale: CGFloat) {
+        // Animation đặt thẳng trên lớp, không qua `NSAnimationContext` —
+        // cùng cách `fade()` đang làm.
+        //
+        // Trước đây dùng `NSAnimationContext` và đặt ảnh bằng `layer.contents`
+        // tay lên `NSImageView`. AppKit sở hữu ô nhớ đó: mỗi lần vẽ lại view
+        // (rất dễ xảy ra khi lớp cha đổi transform — tức đúng lúc widget
+        // "nâng" lên khi bạn giữ chuột) nó chạy `draw()` với không có image và
+        // xoá sạch `contents`. Widget mất trắng, chỉ tới lần đổi ảnh kế tiếp mới
+        // hiện lại. Nay `ImageCanvas` tự vẽ trong `draw(_:)` nên AppKit vẽ lại
+        // bao nhiêu lần cũng ra đúng ảnh — ở đây không cần vá gì thêm.
+        guard let l = container.layer else { return }
+        let target = CATransform3DMakeScale(scale, scale, 1)
+        l.removeAnimation(forKey: "lift")
+        let a = CABasicAnimation(keyPath: "transform")
+        a.fromValue = l.transform
+        a.toValue = target
+        a.duration = 0.15
+        a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        l.add(a, forKey: "lift")
+        // Giá trị model phải khớp ngay, không thì animation chỉ chạy một lần.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        l.transform = target
+        CATransaction.commit()
+    }
+
+    var displayMaxPixel: CGFloat {
+        let scale = settings.renderScale
+        switch settings.sizeMode {
+        case .fitImage: return settings.maxEdge * scale
+        case .fitWidth: return settings.width * scale
+        case .fixed:    return max(settings.width, settings.height) * scale
+        }
+    }
+
+    func applyOpacity() { window.alphaValue = settings.opacity }
+
+    /// Đổi tầng ngay khi người dùng đổi lựa chọn trong menu.
+    func applyLevel() {
+        window.level = activeLevel
+        overlay.setLevel(activeLevel)
+        // `floating` cao hơn hẳn tầng desktop — cần orderFront lại mới nhận
+        // đúng thứ tự vẽ sau khi đổi tầng.
+        window.orderFrontRegardless()
+        Diag.describe(window, "  doi tang")
+    }
+
+    /// Tự chữa: nếu widget đang ở tầng desktop mà có cửa sổ khác che vùng đó,
+    /// thì đổi sang tầng floating để người dùng bấm được.
+    ///
+    /// Bổ sung cho lựa chọn trong menu — không bắt ai phải nhớ bấm. Chỉ tự
+    /// nâng lên, không tự hạ xuống (hạ xuống có thể khiến widget chui xuống dưới
+    /// cửa sổ đúng lúc người dùng đang làm việc).
+    @discardableResult
+    func autoLiftIfOccluded() -> Bool {
+        guard settings.levelMode == .desktop else { return false }
+        let hidden = NSApp.windows.filter { window !== $0 && $0.isVisible
+            && $0.frame.intersects(window.frame) && $0.level > window.level }
+        guard !hidden.isEmpty else { return false }
+        settings.levelMode = .floating
+        applyLevel()
+        return true
+    }
+
+    /// Khoảng trống chừa sẵn trong cửa sổ cho lúc widget "nâng" lên khi giữ chuột.
+///
+/// `lift()` scale cửa sổ lên tới 1.06. Trước đây ảnh áp **đúng mép cửa sổ**, nên
+/// khi scale, phần tràn ra bị cửa sổ cắt và ba góc trông thành vuông. Chỉ góc
+/// dưới-trái còn bo — vì AppKit đặt `anchorPoint = (0,0)` cho view, nên phép scale
+/// quanh chính góc đó, nó đứng yên; ba góc kia thì dịch ra ngoài và bị cắt.
+///
+/// Chừa sẵn khoảng trống này thì cả bốn góc vẫn nằm trong cửa sổ khi nâng lên.
+/// Khoảng trống trong suốt nên nhìn không thấy gì thay đổi lúc đứng yên.
+///
+/// Vì `anchorPoint` được đổi thành tâm (xem `layout()`), mỗi mép chỉ dịch ra
+/// `3% × nửa cỡ ảnh`, nên chỉ cần chừa một nửa.
+private func liftRoom(_ imageSize: NSSize) -> NSSize {
+    // Mép ảnh dịch ra `3% × khoảng cách từ tâm`, mà khoảng cách đó tính cả phần
+    // đang chừa. Giải ra: cần `room ≥ 3.2% × cỡ ảnh` — chừa 4% cho chắc ăn.
+    let k: CGFloat = 0.04
+    return NSSize(width: max(4, imageSize.width * k),
+                  height: max(4, imageSize.height * k))
+}
+
+private func layout() {
+        let i = frameInset, b = frameBottom, p = framePad
+        let room = liftRoom(imageSize)
+        window.setContentSize(NSSize(width: imageSize.width + (i + p) * 2 + room.width * 2,
+                                     height: imageSize.height + (i + p) * 2 + b + room.height * 2))
+        container.frame = container.bounds
+        // AppKit đặt `anchorPoint = (0,0)` cho view, tức phép scale quanh góc
+        // dưới-trái — widget "nâng" lên lệch hẳn sang một bên, và mép nào bị
+        // đẩy ra ngoài cửa sổ thì thành góc vuông. Chuyển sang tâm: nâng lên từ
+        // chính giữa (đúng nghĩa), và mỗi mép chỉ dịch ra nửa chừng nên chỗ
+        // trống phải chừa cũng giảm được một nửa.
+        if let cl = container.layer {
+            cl.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            cl.position = CGPoint(x: container.bounds.midX, y: container.bounds.midY)
+        }
+        let r = NSRect(x: i + p + room.width, y: i + p + room.height,
+                       width: imageSize.width, height: imageSize.height)
+        imageView.frame = r
+        topView.frame = r
+        settings.frameStyle.decorate(in: container, imageRect: imageView.frame)
+        layoutControls()
+        updateShadowPath()
+    }
+
+    /// Cho biết chính xác hình dạng nào đổ bóng.
+    ///
+    /// Không có dòng này, CoreAnimation phải tự dựng bóng: rasterize nội dung
+    /// lớp thành ảnh rồi áp bộ lọc Gaussian mỗi khi khung đổi — tức là MỖI
+    /// lần kéo widget, vì kéo là đổi khung. Đo thì riêng bước dựng bóng này
+    /// nặng hơn cả bước vẽ ảnh. Chỉ định `shadowPath` thì nó dùng luôn đường
+    /// này, không phải làm gì.
+    private func updateShadowPath() {
+        guard let l = container.layer else { return }
+        guard l.shadowOpacity > 0 else {
+            l.shadowPath = nil
+            return
+        }
+        // Bóng ôm mép ẢNH, không phải mép cửa sổ. Nhờ `pad` chừa sẵn chỗ nên
+        // bông bóng lan ra được mà không bị mép cửa sổ cắt.
+        //
+        // Vì sao bo góc của đường bóng PHẢI rộng hơn bo góc của ảnh: bộ lọc
+        // Gaussian lan ra mọi phía, nên nó lấn vào cả phần khuyết ở góc. Bo góc
+        // 20pt gặp blur 14pt là bị lấn gần hết — nhìn ra bóng có hình chữ nhật
+        // chứ không phải bo góc. Nới rộng đường bông bóng trước khi blur thì
+        // kết quả sau blur mới tròn đúng như ảnh.
+        let blur = CGFloat(l.shadowRadius)
+        let r = settings.frameStyle.imageCorner + blur * 0.75
+        let grow = blur * 0.35
+        l.shadowPath = CGPath(
+            roundedRect: imageView.frame.insetBy(dx: -grow, dy: -grow),
+            cornerWidth: r, cornerHeight: r, transform: nil)
+    }
+
+    /// Đặt cụm nút trong góc trên phải của vùng ảnh, chồm lên viền.
+    private func layoutControls() {
+        let inset: CGFloat = 8
+        controls.place(inside: NSSize(width: imageSize.width, height: imageSize.height),
+                       offset: CGPoint(x: imageSize.width - inset, y: imageSize.height - inset))
+    }
+
+    /// Hiện / ẩn nút điều khiển.
+    func setControlsVisible(_ v: Bool) {
+        guard !container.isPressed else { return }
+        controls.isHidden = !v
+    }
+
+    func setPinned(_ p: Bool) { controls.isPinned = p }
+
+    /// Gắn hành động cho nút — AppController nối vào danh sách ảnh.
+    func wireControls(onPrev: @escaping () -> Void,
+                     onNext: @escaping () -> Void,
+                     onPin: @escaping () -> Void) {
+        controls.onPrev = onPrev
+        controls.onNext = onNext
+        controls.onTogglePin = onPin
+    }
+
+    /// Nối xử lý khi người dùng thả file/thư mục từ Finder vào widget.
+    func wireDrop(_ handler: @escaping ([URL]) -> Void) {
+        container.onFilesDropped = handler
+    }
+
+    /// Mở ảnh gốc trong Finder, tô sáng file đó.
+    func revealCurrentInFinder() {
+        guard let u = currentURL,
+              FileManager.default.fileExists(atPath: u.path) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([u])
+    }
+
+    // MARK: - Hiển thị
+
+    func show(_ url: URL, evenIfBusy: Bool = false) {
+        // Đang kéo mà đổi ảnh thì cửa sổ đổi kích thước và giật khỏi tay
+        // người dùng — hoãn lại (AppController sẽ thử lại sau vài giây).
+        guard evenIfBusy || !busy else { return }
+        guard let px = ImageStore.pixelSize(of: url) else { return }
+        let aspect = px.width / px.height
+        guard aspect.isFinite, aspect > 0 else { return }
+
+        let target: NSSize
+        switch settings.sizeMode {
+        case .fixed:
+            target = NSSize(width: settings.width, height: settings.height)
+        case .fitWidth:
+            target = NSSize(width: settings.width, height: (settings.width / aspect).rounded())
+        case .fitImage:
+            let m = settings.maxEdge
+            target = aspect >= 1
+                ? NSSize(width: m, height: (m / aspect).rounded())
+                : NSSize(width: (m * aspect).rounded(), height: m)
+        }
+
+        // Ảnh còn trong RAM: đổi tức thì, không cần bố trí hẹn giờ.
+        // Đây là đường đi của nút ‹ › và của mọi lần quay lại ảnh vừa xem.
+        if let img = ImageStore.inMemory(url, maxPixel: displayMaxPixel) {
+            applyImage(img, url: url, size: target)
+            return
+        }
+
+        // Chưa có trong RAM: giải mã ngoài luồng chính.
+        //
+        // Trước đây việc này chạy thẳng trên luồng chính. Ảnh gốc 3840×2160 mất
+        // 0.33s để giải mã — nghĩa là widget đứng hình gần nửa giây. Giờ luồng
+        // chính giữ nguyên và ảnh về sau, không về trước.
+        showToken += 1
+        let token = showToken
+        let pixel = displayMaxPixel
+        ImageStore.load(url, maxPixel: pixel) { [weak self] img in
+            guard let self, let img, self.showToken == token, !self.busy else { return }
+            self.applyImage(img, url: url, size: target)
+        }
+    }
+
+    /// Đặt ảnh vào khung: đổi ảnh và đổi kích thước cửa sổ trong một lần vẽ.
+    /// Tách riêng là để ảnh không bao giờ bị thấy ở khung kia.
+    private func applyImage(_ img: NSImage, url: URL, size target: NSSize) {
+        let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+
+        currentImage = img
+        currentURL = url
+        imageSize = target
+        applyAppearance()
+        layout()
+        // Đặt khung trước rồi mới mờ ảnh — nếu mờ trước, giữa lúc chuyển sẽ
+        // thấy ảnh cũ ở khung cũ rồi nhảy sang khung mới.
+        crossfade(to: img)
+        window.alphaValue = settings.opacity
+
+        var f = window.frame
+        f.origin = NSPoint(x: center.x - f.width / 2, y: center.y - f.height / 2)
+        window.setFrameOrigin(clampToVisibleScreen(f.origin))
+        // Vị trí thực đã đổi theo kích thước ảnh mới — lưu lại để lần mở sau
+        // không nhảy về chỗ cũ.
+        settings.savedOrigin = window.frame.origin
+        window.orderFrontRegardless()
+
+        if !settled {
+            settled = true
+            settle()
+        }
+    }
+
+    func applyAll() {
+        applyAppearance()
+        refreshImageLayer()
+        layout()
+        window.alphaValue = settings.opacity
+    }
+
+    // MARK: - Lưới
+
+    /// Màn hình đang chứa widget — không phải lúc nào cũng là `NSScreen.main`
+    /// (main là màn hình có menu bar, còn widget có thể bị kéo sang màn khác).
+    private func currentScreen() -> NSScreen? {
+        let c = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        return NSScreen.screens.first { NSMouseInRect(c, $0.frame, false) } ?? NSScreen.main
+    }
+
+    /// Lưới tính theo kích thước widget, cộng bốn ô sát mép màn hình.
+    /// Thuật toán nằm ở `GridSnapper` — không phụ thuộc AppKit nên kiểm chứng
+    /// được bằng phép tính.
+    private func snapSlots(size: NSSize, on s: NSScreen) -> [NSPoint] {
+        GridSnapper.slots(widgetSize: size, visibleFrame: s.visibleFrame)
+    }
+
+    private func nearestIndex(in slots: [NSPoint], to origin: NSPoint) -> Int? {
+        GridSnapper.nearest(in: slots, to: origin)
+    }
+
+    /// Tính lại lưới khi đổi màn hình giữa lúc kéo. Cùng một mảng `activeSlots`
+    /// được dùng cho cả highlight lẫn thả — không bao giờ lệch nhau.
+    /// Viền trong suốt quanh ảnh — lệch toạ độ từ góc cửa sổ tới góc ảnh.
+///
+/// Cửa sổ lớn hơn ảnh (xem `liftRoom`) nên góc cửa sổ KHÔNG phải góc ảnh. Mọi
+/// thứ liên quan tới lưới phải dùng cỡ và vị trí của **ảnh**, vì đó mới là thứ
+/// người dùng nhìn thấy và nhắm tới.
+private var imageInset: NSPoint {
+    let room = liftRoom(imageSize)
+    return NSPoint(x: frameInset + framePad + room.width,
+                   y: frameInset + framePad + room.height)
+}
+
+/// Góc trên-trái của ảnh theo toạ độ màn hình.
+private var imageOrigin: NSPoint {
+    NSPoint(x: window.frame.minX + imageInset.x,
+            y: window.frame.minY + imageInset.y)
+}
+
+private func ensureSlots() {
+        guard let s = currentScreen() else { return }
+        if activeScreen !== s || activeSlots.isEmpty {
+            activeScreen = s
+            activeSlots = snapSlots(size: imageSize, on: s)
+        }
+    }
+
+    private func settle() {
+        // Người dùng tắt khe lưới thì lần mở sau giữ đúng chỗ cũ, chỉ kẹp
+        // trong màn hình — không ép vào ô.
+        guard settings.snapToGrid else {
+            window.setFrameOrigin(clampToVisibleScreen(window.frame.origin))
+            return
+        }
+        ensureSlots()
+        if let i = nearestIndex(in: activeSlots, to: window.frame.origin) {
+            window.setFrameOrigin(activeSlots[i])
+            settings.savedOrigin = window.frame.origin
+        }
+    }
+
+    /// Kéo về ô lưới ngay — dùng khi người dùng bật chế độ khe từ menu.
+    func settleNow() { settle() }
+
+    // MARK: - Kéo
+
+    /// Giữ ~0.25s: nhấc nhẹ widget để báo hiệu "đang giữ, sắp vào chế độ lưới".
+    private func holdHint() { lift(1.04) }
+
+    private func cancelHoldHint() { lift(1.0) }
+
+    /// Giữ đủ 1.2s: bật chế độ lưới và hiện toàn bộ ô hợp lệ.
+    private func armSnapMode() {
+        lift(1.06)
+        activeScreen = nil
+        ensureSlots()
+        guard let s = activeScreen, !activeSlots.isEmpty else { return }
+        // Ô lưới bo góc theo CHÍNH widget, để hình khớp lúc thả.
+        // Trước đây đọc `settings.cornerRadius` — một tuỳ chọn riêng, tách rời
+        // khỏi kiểu khung, nên đổi khung xong ô lưới vẫn bo theo giá trị cũ.
+        overlay.show(slots: activeSlots, size: imageSize,
+                     corner: settings.frameStyle.imageCorner, on: s)
+        overlay.highlight(index: nearestIndex(in: activeSlots, to: imageOrigin))
+    }
+
+    private func dragFree(to origin: NSPoint) {
+        window.setFrameOrigin(clampToVisibleScreen(origin))
+    }
+
+    private func dragSnapped(to origin: NSPoint) {
+        window.setFrameOrigin(clampToVisibleScreen(origin))
+        // Kéo sang màn hình khác giữa chừng thì tính lại lưới cho màn đó.
+        let before = activeScreen
+        ensureSlots()
+        if activeScreen !== before, let s = activeScreen {
+            overlay.show(slots: activeSlots, size: imageSize,
+                         corner: settings.frameStyle.imageCorner, on: s)
+        }
+        overlay.highlight(index: nearestIndex(in: activeSlots, to: imageOrigin))
+    }
+
+    private func finishDrop(_ result: DropResult) {
+        overlay.hide()
+        lift(1.0)
+        activeScreen = nil
+
+        switch result {
+        case .snap:
+            ensureSlots()
+            if let i = nearestIndex(in: activeSlots, to: imageOrigin) {
+                // Lưới bám ảnh, nên khi khe phải dịch cửa sổ lùi lại đúng phần
+                // viền trong suốt — nếu không, cửa sổ sẽ lệch so với ô.
+                let inset = imageInset
+                window.setFrameOrigin(NSPoint(x: activeSlots[i].x - inset.x,
+                                              y: activeSlots[i].y - inset.y))
+            }
+            settings.savedOrigin = window.frame.origin
+        case .free:
+            // Kéo tự do: giữ đúng chỗ người dùng thả.
+            settings.savedOrigin = window.frame.origin
+        case .click:
+            break
+        }
+    }
+
+    // MARK: - Vị trí
+
+    private func restorePosition() {
+        if let o = settings.savedOrigin {
+            window.setFrameOrigin(o)
+            return
+        }
+        guard let s = NSScreen.main?.visibleFrame else { return }
+        window.setFrameOrigin(NSPoint(x: s.maxX - window.frame.width - 36,
+                                     y: s.maxY - window.frame.height - 36))
+    }
+
+    private func clampToVisibleScreen(_ origin: NSPoint) -> NSPoint {
+        guard let s = currentScreen()?.visibleFrame else { return origin }
+        let f = window.frame.size
+        let m: CGFloat = 4
+        return NSPoint(
+            x: min(max(origin.x, s.minX + m), max(s.minX + m, s.maxX - f.width - m)),
+            y: min(max(origin.y, s.minY + m), max(s.minY + m, s.maxY - f.height - m))
+        )
+    }
+
+    /// Kéo widget về màn hình khi nó rơi ra ngoài mọi màn hình đang cắm.
+    ///
+    /// Xảy ra khi: kéo widget sang màn hình phụ rồi rút cáp. Toạ độ đã lưu trỏ
+    /// tới vị trí không còn tồn tại, widget biến mất và người dùng tưởng app
+    /// treo. Chỉ kiểm tra cắt qua `NSScreen.frame` — dùng `visibleFrame` thì
+    /// widget nằm sát mép dưới sẽ bị coi là "ngoài" dù vẫn thấy được.
+    @discardableResult
+    func recoverIfOffscreen() -> Bool {
+        let f = window.frame
+        let onSomeScreen = NSScreen.screens.contains { NSIntersectsRect($0.frame, f) }
+        guard !onSomeScreen else { return false }
+
+        guard let s = NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame
+        else { return false }
+        window.setFrameOrigin(NSPoint(
+            x: min(max(f.minX, s.minX + 4), max(s.minX + 4, s.maxX - f.width - 4)),
+            y: min(max(f.minY, s.minY + 4), max(s.minY + 4, s.maxY - f.height - 4))))
+        settings.savedOrigin = window.frame.origin
+        return true
+    }
+}
+
+--- FILE: Sources/main.swift ---
+import AppKit
+
+// LitePic — widget ảnh nhẹ cho desktop macOS.
+//
+// Thiết kế: menu-bar app (không Dock icon), không network, không dependency.
+// Ảnh chỉ được giải mã ở đúng độ phân giải hiển thị, và chỉ khi timer tới hạn.
+
+let app = NSApplication.shared
+let controller = AppController()
+
+app.delegate = controller
+app.setActivationPolicy(.accessory)
+app.run()

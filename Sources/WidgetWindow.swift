@@ -108,7 +108,15 @@ final class DraggableView: NSView {
 
 /// Lớp phủ trong suốt hiện toàn bộ ô lưới khi đang ở chế độ lưới, để thấy rõ
 /// widget sẽ rơi vào chỗ nào thay vì đoán mò.
+/// Toàn cảnh vẽ ô lưới khi kéo.
+///
+/// Mặc định **không vẽ ô**. Người dùng bảo 81 ô trắng chồng nhau rối mắt, nên
+/// chỉ còn vẽ ô đang ngắm. Muốn bật lại thì đổi `drawAllSlots` thành `true` —
+/// phần vẽ vẫn còn nguyên, không xoá gì.
 final class GridOverlay {
+    /// Bật/tắt việc vẽ TOÀN BỘ ô. `false` = chỉ vẽ ô đang ngắm.
+    private static let drawAllSlots = false
+
     private let window: NSWindow
     private let host = NSView()
     private var slotViews: [NSView] = []
@@ -146,6 +154,9 @@ final class GridOverlay {
             v.layer?.borderWidth = 1.5
             v.layer?.borderColor = NSColor.white.withAlphaComponent(0.5).cgColor
             v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+            // Tắt vẽ thì ô không hiện, nhưng vẫn giữ trong `slotViews` để
+            // `highlight()` tô sáng ô đang ngắm hoạt động như cũ.
+            v.isHidden = !Self.drawAllSlots
             host.addSubview(v)
             return v
         }
@@ -174,6 +185,9 @@ final class GridOverlay {
 
     private func paint(_ v: NSView, on: Bool) {
         guard let l = v.layer else { return }
+        // Khi tắt vẽ toàn bộ ô thì ô đang ngắm vẫn phải hiện — nếu không,
+        // người dùng không thấy chỗ nó sẽ rơi vào, và lưới thành vô dụng.
+        v.isHidden = !on && !Self.drawAllSlots
         l.borderWidth = on ? 2.5 : 1.5
         l.borderColor = on
             ? NSColor.controlAccentColor.cgColor
@@ -244,11 +258,29 @@ final class WidgetWindow {
     private let imageView: ImageCanvas
     /// Lớp ảnh thứ hai, chồm lên lớp đầu — dùng để chuyển ảnh mềm.
     private let topView: ImageCanvas
-    private let overlay = GridOverlay(level: NSWindow.Level(
-        rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 21))
+    private let overlay = GridOverlay(level: WidgetWindow.desktopLevel + 1)
 
+    /// Tầng cho chế độ "Trên wallpaper (dưới app)".
+    ///
+    /// KHÔNG dùng `desktopWindow + 20`. Trên máy này:
+    ///
+    /// ```
+    /// kCGDesktopWindowLevel     = -2147483623
+    /// kCGDesktopIconWindowLevel = -2147483603
+    /// kCGMinimumWindowLevel     = -2147483643
+    /// kCGNormalWindowLevel      =          0
+    /// ```
+    ///
+    /// `desktopWindow + 20` ra đúng `-2147483603` — **trùng khớp tầng desktop
+    /// icon**. Đo thực nghiệm cho thấy mọi tầng ≤ `-2147483602` đều bị hệ thống
+    /// xếp vào loại **"desktop element"**: cửa sổ biến mất khỏi `CGWindowList`
+    /// với bộ lọc chuẩn, nên tự động hoá, công cụ chụp màn hình và trình quản
+    /// lý cửa sổ đều không thấy nó.
+    ///
+    /// `desktopIcon + 2` là mức **thấp nhất** vẫn còn là cửa sổ bình thường, và
+    /// vẫn nằm dưới mọi cửa sổ app (0) — đúng nghĩa "dưới app".
     private static let desktopLevel: NSWindow.Level = {
-        NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 20)
+        NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 2)
     }()
 
     /// Tầng thực tế đang dùng — `floating` cao hơn cửa sổ app (0) nên luôn bấm được.

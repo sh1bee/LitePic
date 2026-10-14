@@ -376,7 +376,12 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func showPinnedIfNeeded() {
         guard let p = settings.pinnedURL,
               images.contains(where: { $0.path == p }) else { return }
-        if images[lastIndex].path != p, let i = images.firstIndex(where: { $0.path == p }) {
+        // Cùng lý do với `step()`: `reload()` đặt `lastIndex = -1` rồi gọi
+        // thẳng `advance()`, mà `advance()` rẽ vào đây khi đang ghim. Nghĩa là
+        // chỉ cần ghim một ảnh rồi có bất kỳ lần quét lại thư mục nào (FSEvent,
+        // hay lúc mở app) là vào tới `images[-1]` và crash — không cần bấm gì.
+        let curPath = images.indices.contains(lastIndex) ? images[lastIndex].path : nil
+        if curPath != p, let i = images.firstIndex(where: { $0.path == p }) {
             lastIndex = i
             widget.show(images[i])
         }
@@ -391,8 +396,11 @@ final class AppController: NSObject, NSApplicationDelegate {
             pool = images.filter { $0.path != settings.pinnedURL }
         }
         guard !pool.isEmpty else { return }
-        let cur = images[lastIndex]
-        let curInPool = pool.firstIndex(of: cur) ?? 0
+        // `lastIndex` khởi tạo là -1 và cũng bị đặt lại khi quét lại thư mục.
+        // Nếu `images` đã có ảnh (quét xong) mà chưa hiện ảnh nào, bấm ‹ › sẽ
+        // vào thẳng `images[-1]` và CRASH. Phải chặn trước khi lấy phần tử.
+        let cur = images.indices.contains(lastIndex) ? images[lastIndex] : nil
+        let curInPool = cur.flatMap { pool.firstIndex(of: $0) } ?? 0
         let next = ((curInPool + delta) % pool.count + pool.count) % pool.count
         if let i = images.firstIndex(of: pool[next]) {
             lastIndex = i

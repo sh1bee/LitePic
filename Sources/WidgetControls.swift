@@ -2,7 +2,7 @@ import AppKit
 
 /// Thanh nút nhỏ trên widget: ảnh trước / kế tiếp / ghim.
 ///
-/// Các nút nằm trong một hàng dọc ở góc trên phải, chỉ hiện khi rê chuột vào
+/// Các nút nằm thành một hàng ngang ở góc trên phải, chỉ hiện khi rê chuột vào
 /// widget (hoặc lúc kéo) — giống cách widget macOS ẩn điều khiển khi rời chuột.
 final class WidgetControls: NSView {
     var onPrev: (() -> Void)?
@@ -22,8 +22,6 @@ final class WidgetControls: NSView {
     private static let side: CGFloat = 26
     private static let gap: CGFloat = 6
     private static let pad: CGFloat = 8
-
-    private var origin = CGPoint.zero
 
     init() {
         super.init(frame: .zero)
@@ -49,10 +47,20 @@ final class WidgetControls: NSView {
         b.setButtonType(.momentaryChange)
     }
 
-    /// Vị trí trong hệ toạ độ của widget (widget đặt góc trên phải).
-    func place(inside size: NSSize, offset: CGPoint) {
-        let w = Self.side, gap = Self.gap
-        origin = CGPoint(x: offset.x - w - gap, y: offset.y + size.height - w - gap)
+    /// Dán cụm nút vào góc trên phải của vùng ảnh `imageRect`.
+    ///
+    /// `imageRect` là `imageView.frame` — hệ toạ độ của `container`, cùng hệ với
+    /// `self`. Trước đây hàm này nhận `(inside:offset:)` và tự tính `origin`:
+    /// nó cộng thêm `size.height` vào `offset.y` trong khi `offset.y` đã là toạ độ
+    /// tính từ đáy, nên cụm nút rơi xuống tầm **hai lần chiều cao ảnh** — nằm ngoài
+    /// màn hình; và nó chỉ lùi `side + gap` nên cụm rộng 90pt bị thò ra ngoài mép
+    /// phải.
+    func place(atTopRightOf imageRect: NSRect) {
+        let total = Self.side * 3 + Self.gap * 2
+        let margin = Self.pad
+        frame = CGRect(x: imageRect.maxX - total - margin,
+                       y: imageRect.maxY - Self.side - margin,
+                       width: total, height: Self.side)
         layoutButtons()
     }
 
@@ -62,8 +70,6 @@ final class WidgetControls: NSView {
                                width: Self.side, height: Self.side)
         pinBtn.frame = CGRect(x: nextBtn.frame.maxX + Self.gap, y: 0,
                               width: Self.side, height: Self.side)
-        let total = pinBtn.frame.maxX
-        frame = CGRect(origin: origin, size: NSSize(width: total, height: Self.side))
         // Nền nửa trong suốt để nút đọc được trên cả ảnh sáng lẫn tối.
         wantsLayer = true
         layer?.cornerRadius = Self.side / 2

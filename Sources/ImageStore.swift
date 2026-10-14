@@ -89,7 +89,17 @@ enum ImageStore {
               let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
               w > 0, h > 0
         else { return nil }
-        let size = CGSize(width: w, height: h)
+
+        // PHẢI xét cờ Orientation. `PixelWidth/PixelHeight` là kích thước THÔ
+        // của file: ảnh chụp dọc từ điện thoại vẫn lưu 4032×3024 ngang. Nhưng
+        // `decodeThumbnail` bên dưới bật
+        // `kCGImageSourceCreateThumbnailWithTransform: true` nên ảnh thật sự
+        // được xoay về dọc. Không sửa ở đây thì tỉ lệ khung lệch với ảnh:
+        // cửa sổ bị co theo khổ ngang còn ảnh bên trong lại dọc → méo hoặc
+        // thừa lề đen.
+        let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        let rotated = (5...8).contains(orientation)   // 5,6,7,8 = xoay 90°/270°
+        let size = rotated ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
 
         lock.lock()
         if sizeMemo.count > 512 { sizeMemo.removeAll() }   // đừng phình vô hạn

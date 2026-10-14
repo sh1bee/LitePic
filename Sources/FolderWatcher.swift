@@ -48,7 +48,12 @@ final class FolderWatcher {
             let self_ = Unmanaged<FolderWatcher>.fromOpaque(info).takeUnretainedValue()
             let paths = rawPaths.bindMemory(to: CFString.self, capacity: count)
             for i in 0..<count { Diag.log("FSEvent: \(paths[i])") }
-            self_.onChange?()
+            // PHẢI bắn về main queue. FSEvents gọi callback trên `queue` (luồng
+            // phụ), còn `onChange` lại đụng vào `rescanPending`/`rescanScheduled`
+            // của AppController — những biến đó main thread cũng đọc/ghi. Gọi
+            // thẳng từ luồng phụ là data race, AppKit cũng không an toàn khi bị
+            // gọi sai luồng.
+            DispatchQueue.main.async { self_.onChange?() }
         }
 
         guard let s = FSEventStreamCreate(

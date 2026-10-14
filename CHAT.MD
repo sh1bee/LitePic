@@ -247,3 +247,87 @@ và cần `≥ 3.2% × cỡ ảnh`. Thiếu thì góc lại vuông — đo lại
 Hệ quả: cửa sổ lớn hơn ảnh ~8%, nên **lưới phải bám ảnh** (`imageSize`,
 `imageOrigin`) chứ không bám `window.frame` — người dùng nhìn thấy ảnh, không
 phải khung cửa sổ.
+
+---
+
+## 7. Đợt 14/10: sáu lỗi, và bài học lớn nhất là về **phép đo**
+
+Cả sáu lỗi đều do người dùng báo, và cả sáu đều đúng. Nhưng đáng kể hơn: **năm
+trong số đó tôi tự kết luận sai trước khi sửa phép đo.**
+
+### Sửa hiển thị làm lộ lỗi toạ độ đã ẩn
+
+Răng cưa phim 35mm "dồn cụm giữa ảnh" — đúng là trục Y đứng yên. Tôi sửa xong, đo
+lại, thấy răng **vẫn nằm sai chỗ**: vì răng là subview của nền nền mà khung lại lấy
+toạ độ của cha. Hai lỗi trong cùng một khối 6 dòng. Sửa mỗi lỗi một, mỗi lần lại
+lộ lỗi kia.
+
+> **Sửa xong phải đo lại từ đầu, không tin phép đo cũ.**
+
+### Đề xuất của người dùng: đúng một nửa
+
+Báo cáo lỗi răng cưa kèm sẵn đoạn code sửa đặt răng ở `r.minX - 18` và
+`r.maxX + 6`. Tôi đo được: hai cột nằm **ngoài dải phim**, lên thành viền trong
+suốt. Nguyên nhân đúng (trục Y), nhưng **công thức trục X của đề xuất đặt sai chỗ**.
+Nếu tôi dán thẳng vào báo cáo thành công, người dùng sẽ nhận một widget trông
+lạ. Suy luận "đề xuất có lỗ hổng" là được — nhưng phải **đo**, không phải cảm.
+
+### Tầng cửa sổ: số "+20" trông hợp lý thì vẫn sai
+
+`CGWindowLevelForKey(.desktopWindow) + 20` nghe rất hợp lý. Kết quả:
+`-2147483603` — **trùng đúng tầng desktop icon**, và mọi tầng ≤ `-2147483602` bị hệ
+thống xếp thành desktop element, tức biến mất khỏi mọi danh sách cửa sổ chuẩn.
+
+Ngưỡng đó không có trong tài liệu, tôi phải **dò thử 14 mức tầng** mới biết. Với
+tầng cửa sổ, đừng suy từ tên hằng số — hãy đo.
+
+### Đừng dừng ở chỗ hỏng đầu tiên
+
+`lastIndex = -1` gây crash ở `step()` — đúng như báo cáo. Nhưng ngay cạnh đó còn
+`showPinnedIfNeeded()`, cũng đọc `images[lastIndex]`, và **dễ trúng hơn hẳn**: chỉ
+cần ghim ảnh rồi có lần quét lại thư mục nào là chết, không cần bấm gì.
+
+Tái hiện được trên app thật trong 5 giây: ghim ảnh → mở app → chết. Báo cáo crash
+chỉ đúng `AppController.showPinnedIfNeeded()`. Sửa xong chạy lại đúng kịch bản đó:
+app sống.
+
+> **Săn lỗi index phải grep hết, không dừng ở lỗi đầu.** Dòng 455 vốn đã có
+> chặn sẵn — nghĩa là đây không phải "quên chặn", mà là "chặn sót".
+
+### Bốn cái tôi đo sai trước khi sửa
+
+| Sai lầm | Vì sao |
+|---|---|
+| `func mir<T>` ở top-level `main.swift` | Swift không cho specialize hàm global ở `main.swift` — báo lỗi rất khó hiểu |
+| `Mirror` tìm `imageInset` | Đó là thuộc tính **có thân hàm**, `Mirror` không thấy; tôi tưởng app sai |
+| `s2.frame` của view cháu | Toạ độ **của cha**, lệch đúng bằng `bg.origin` |
+| `semaphore.wait` chờ callback | `ImageStore.load` bắn qua `DispatchQueue.main.async` → **deadlock**, đo ra ảnh `0×0`, tôi kết luận app giải mã hỏng |
+
+Cái cuối đáng nhớ nhất: **phép đo hỏng trông giống hệt app hỏng.** Đo sai mà
+kết luận sai thì còn tệ hơn không đo.
+
+### Một việc tôi **không** làm được
+
+Tái hiện riêng crash của `step()` bằng cách bấm nút tự động: **thất bại**. Post
+`CGEvent` sang app khác cần quyền Accessibility, và cửa sổ chưa kịp hiện. Không
+ghi nhận là đã tái hiện được chỗ đó. Bằng chứng cho nhánh `images[-1]` đến từ crash
+*thật* ở chỗ kia — cùng nguyên nhân, cùng biểu thức.
+
+### Lưới: bỏ 83/84 ô nhưng phải giữ ô đang ngắm
+
+Người dùng bảo 84 ô trắng chồng nhau rối mắt, chỉ ẩn đừng xoá. Làm bằng cờ
+`drawAllSlots = false`, không xoá dòng nào. Nhưng phải sửa thêm `paint()`: nếu chỉ
+ẩn ở chỗ tạo ô thì **ô đang ngắm cũng biến mất**, và lưới thành vô dụng vì
+người dùng không thấy chỗ nó sẽ rơi vào. Đo lại: 84 ô, **hiện đúng 1**.
+
+### Hiệu năng sau tất cả
+
+```
+cpu_idle_pct        0.0  → 0.0     (không đổi)
+ram_median          9.5  → 9.7 MB  (+2.1%)
+ram_slope           0.00 → 0.00    (phẳng)
+threads             3    → 3
+```
+
+Không hồi quy. Số luồng không đổi dù thêm `DispatchQueue.main.async` — đo mới tin,
+đoán thì không.

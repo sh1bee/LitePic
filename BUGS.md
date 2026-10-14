@@ -3,6 +3,25 @@
 Cách dùng: gặp triệu chứng → tra bảng → đọc mục "Nhận ra" và "Đo thế nào".
 Mỗi mục đều có **phép đo cụ thể đã chạy được**, không phải mô tả miệng.
 
+## Mục lục
+
+| # | Triệu chứng | Chỗ |
+|---|---|---|
+| 1 | Widget trống khi giữ chuột | `layer.contents` bị AppKit xoá |
+| 2 | Ba góc vuông khi giữ | `anchorPoint` + cửa sổ bằng đúng cỡ ảnh |
+| 3 | Bốn bẫy khi đo AppKit | mục tra cứu |
+| 4 | Đo hiệu năng | `./bench.sh` |
+| 5 | Chế độ "dưới app" — widget biến mất khỏi danh sách cửa sổ | tầng cửa sổ âm |
+| 6 | **Crash** khi bấm ‹ ›, và khi đang ghim ảnh | `images[-1]` — **hai** chỗ |
+| 7 | Kéo thả vào ô, khởi động thì lệch ô | `settle()` bỏ qua `imageInset` |
+| 8 | Nút ‹ › 📌 tràn ra ngoài ảnh | `WidgetControls.place` |
+| 9 | Răng cưa phim dồn cụm giữa ảnh | trục Y **+** hệ toạ độ con |
+| 10 | Tranh chấp luồng khi thư mục đổi | FSEvents trên luồng phụ |
+| 11 | Ảnh chụp dọc bị méo | EXIF `Orientation` bị bỏ qua |
+| 12 | Widget mờ 25% lúc chuyển ảnh | hai lớp cùng mờ |
+
+Mục 6, 9 và 12 đều có **hai nguyên nhân chồng nhau** — sửa một chưa đủ.
+
 ---
 
 ## 1. Widget biến mất khi giữ chuột (đã sửa)
@@ -143,3 +162,238 @@ mẫu ở `README.md` mục 6), đừng chỉ nhìn một con số tổng.
 **GPU không đo được nếu không có `sudo`** cho `powermetrics`. Bộ đo in thẳng
 `khong do duoc` chứ không in số 0 — số 0 sẽ khiến người đọc tưởng app không dùng
 GPU. Cần đo thì chạy khi có `sudo`.
+---
+
+# Vòng 2 — sáu lỗi mới (đều đã sửa và đã đo)
+
+## 5. Chế độ "dưới app": widget bị hệ thống xếp thành *desktop element*
+
+**Triệu chứng.** Bấm "hiển thị dưới app" → widget vẫn hiện, nhưng **biến mất khỏi
+mọi công cụ liệt kê cửa sổ** dùng bộ lọc chuẩn.
+
+**Nhận ra.** Code cũ dùng `CGWindowLevelForKey(.desktopWindow) + 20`. Trên máy này:
+
+```
+kCGDesktopWindowLevel     = -2147483623
+kCGDesktopIconWindowLevel = -2147483603   ← +20 ra ĐÚNG bằng số này
+kCGMinimumWindowLevel     = -2147483643
+kCGNormalWindowLevel      =          0
+```
+
+Tức widget nằm **trùng tầng desktop icon**. Ngưỡng thật không nằm ở con số khai
+báo mà phải dò: bước dần tầng lên và xem cửa sổ còn trong danh sách không.
+
+| Tầng | `CGWindowList` (bộ lọc chuẩn) |
+|---|---|
+| ≤ −2147483602 | **mất** — bị xếp thành desktop element |
+| ≥ −2147483601 | còn |
+
+**Đo thế nào (đã chạy).** Dò 14 mức tầng, mỗi mức đợi 0.35s rồi tra
+`CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements])` xem
+cửa sổ còn không. Trên app đang chạy: trước khi sửa widget chỉ hiện ở lần liệt
+kèm desktop elements; sau khi sửa hiện ở **cả hai** lần liệt.
+
+**Cách sửa.** `desktopIcon + 2` — mức thấp nhất còn là cửa sổ bình thường, vẫn nằm
+dưới mọi cửa sổ app (0). Bài học:
+
+> **Số "+20" trông hợp lý thì vẫn sai.** Ở đây nó trùng đúng một mốc hệ thống.
+> Với tầng cửa sổ, phải **đo ngưỡng thật**, không suy từ tên hằng số.
+
+---
+
+## 6. Crash `images[-1]` — có **hai** chỗ, một chỗ dễ kích hoạt hơn hẳn
+
+**Triệu chứng.** Bấm ‹ › ngay lúc mở app → crash văng.
+
+**Nhận ra.** `lastIndex` khởi tạo `-1`, và `reload()` đặt lại `-1` mỗi lần quét
+lại thư mục. Hai chỗ đọc `images[lastIndex]` mà không chặn:
+
+1. `step(_:)` — đúng như báo cáo.
+2. **`showPinnedIfNeeded()` — không nằm trong báo cáo, và dễ trúng hơn nhiều.**
+   `reload()` → `advance()` → `if isPinned { showPinnedIfNeeded() }`. Nghĩa là
+   **chỉ cần ghim một ảnh rồi có bất kỳ lần quét lại nào là crash**, không cần
+   bấm gì. Đây là lý do dễ gặp hơn, dù báo cáo chỉ nêu `step()`.
+
+**Đo thế nào (đã chạy, không suy luận).** Tái hiện trên app thật:
+
+```bash
+defaults write local.litepic.widget pinnedURL -string "<đường dẫn ảnh trong thư mục>"
+open -a LitePic.app        # bản cũ: chết ngay
+```
+
+Báo cáo crash xác nhận đúng chỗ:
+
+```
+EXC_BAD_INSTRUCTION — Illegal instruction: 4
+  AppController.showPinnedIfNeeded()
+```
+
+Sau khi sửa: cùng kịch bản đó, app sống.
+
+**Cách sửa.** `images.indices.contains(lastIndex)` trước mọi lần lấy phần tử.
+Dòng 455 (`togglePin`) vốn đã có chặn sẵn — nên cái sai là **hai chỗ sót**, không
+phải thiếu hoàn toàn. Khi săn lỗi index, đừng dừng ở chỗ đầu tiên tìm ra.
+
+---
+
+## 7. `settle()` lệch ô lưới — chỉ lệch lúc khởi động, không lệch lúc kéo thả
+
+**Nhận ra.** `finishDrop()` đã được sửa để bám **ảnh** (`imageOrigin`), nhưng
+`settle()` vẫn dùng `window.frame.origin` và `setFrameOrigin(activeSlots[i])` —
+quên `imageInset`.
+
+**Đo thế nào (đã chạy).** Dời widget lệch chỗ, gọi `settle()`, đo khoảng cách từ
+`imageOrigin` tới ô gần nhất:
+
+```
+cách cũ (window.frame.origin) : lệch 17.00pt
+cách mới (imageOrigin)        : lệch  0.61pt   ← ngưỡng làm tròn AppKit 1.5pt
+```
+
+**Cách sửa.** `settle()` y hệt `finishDrop()`: neo theo ô rồi lùi cửa sổ lại
+đúng `imageInset`.
+
+---
+
+## 8. Cụm nút ‹ › 📌 rơi ra ngoài ảnh
+
+**Nhận ra — hai lỗi cộng dồn trong một dòng:**
+
+```swift
+origin = CGPoint(x: offset.x - w - gap, y: offset.y + size.height - w - gap)
+```
+
+`offset.y` đã là toạ độ tính từ đáy, lại cộng thêm `size.height` → cụm nút rơi
+xuống tầm **hai lần chiều cao ảnh**, tức ngoài màn hình. Và chỉ lùi `side + gap`
+(32pt) trong khi cụm rộng `26×3 + 6×2 = 90pt` → thò ra ngoài mép phải 50pt.
+
+**Đo thế nào (đã chạy).** So khung cụm nút với khung ảnh thật:
+
+```
+cụm nút ngang [276..366]  ⊂  ảnh [14..374]
+cụm nút dọc  [177..203]  ⊂  ảnh [8..211]
+điểm neo (276,177) — nằm trong container, không bay ra ngoài
+bề rộng 90pt = đúng 3 nút + 2 khe
+```
+
+**Cách sửa.** Bỏ hẳn việc tự tính `origin`: `place(atTopRightOf: imageView.frame)`
+— dán theo khung **thật** của ảnh.
+
+---
+
+## 9. Răng cưa phim 35mm — **hai** lỗi chồng lên nhau, sửa một chỉ thấy một
+
+**Triệu chứng.** 28 lỗ chấm dồn thành một cụm ngang ở giữa ảnh.
+
+**Lỗi 1 (đã thấy).** Trục Y đứng yên: `y: r.midY - 8`, cả hai bên lại tăng theo
+trục X → cụm ngang.
+
+**Lỗi 2 (chỉ lộ ra khi sửa xong lỗi 1).** Răng là **subview của `bg`**, nên khung
+của nó phải tính trong `bg.bounds`. Code lấy `r.minX`/`r.maxX` — toạ độ của
+`container` — nên **mọi lỗ bị dịch đúng bằng `bg.origin`** và trượt ra ngoài dải
+phim, lên thành viền trong suốt.
+
+**Đo thế nào (đã chạy).** Đo bằng cả cây view lẫn pixel thật:
+
+```
+toạ độ view (đã quy về view gốc):  trái x=26..38,  phải x=418..430
+nền phim:                          x=22..434          → cả hai cột đều TRONG nền
+phân tích pixel ảnh chụp (2x):     11 hàng trang mỗi bên,
+                                    y = 56,103,149,…,520 (đều tăm 23pt),
+                                    0 vệt trắng ngoài dải
+```
+
+**Cách sửa.** Toàn bộ hình học lấy từ `bg.frame`; x = `margin` hoặc
+`bg.frame.width − margin − toothW`; y rải đều theo `k * step`.
+
+> **Sửa lỗi hiển thị đôi khi làm lộ lỗi toạ độ đã ẩn.** Hai lỗi này cùng nằm ở
+> một khối 6 dòng; nếu chỉ nhìn "lỗ chấm dồn cụm" thì sửa xong vẫn còn lỗi kia.
+
+**Bẫy đo liên quan.** Bản sửa đầu tiên của tôi theo đúng công thức đề xuất
+(`x = r.minX − 18` / `r.maxX + 6`) đặt răng **ngoài dải phim**. Số đo cây view đã
+bắt được (`trong nền? KHONG`) — nhìn ảnh thì dễ tưởng ổn.
+
+---
+
+## 10. Data race: FSEvents gọi callback trên luồng phụ
+
+**Nhận ra.** `FSEventStreamSetDispatchQueue(s, queue)` đưa callback về luồng phụ,
+nhưng `onChange` lại đụng `rescanPending`/`rescanScheduled` của AppController —
+hai biến main thread cũng đọc/ghi.
+
+**Đo thế nào (đã chạy).** Bọc callback ghi `Thread.isMainThread` vào ô có khoá,
+chạm một file trong thư mục đang theo dõi, chờ nhận:
+
+```
+✓ có nhận FolderWatcher
+✓ callback chạy trên MAIN
+```
+
+**Cách sửa.** `DispatchQueue.main.async { self_.onChange?() }` — cả vì race, vì
+AppKit cũng không an toàn khi bị gọi sai luồng.
+
+---
+
+## 11. Ảnh dọc có cờ EXIF bị méo tỉ lệ khung
+
+**Nhận ra.** `pixelSize(of:)` đọc `PixelWidth/PixelHeight` — kích thước **thô** của
+file. Ảnh chụp dọc từ điện thoại vẫn lưu ngang (4032×3024). Nhưng `decodeThumbnail`
+bật `kCGImageSourceCreateThumbnailWithTransform: true` nên ảnh thật sự được xoay
+về dọc. Khung cửa sổ bám khổ ngang, ảnh bên trong dọc → méo hoặc thừa lề đen.
+
+**Đo thế nào (đã chạy).** Tự tạo một JPEG có `Orientation = 6` rồi đối chiếu ba
+đường đo:
+
+```
+file thô 800×600, orientation=6
+  pixelSize sau khi sửa   : 600×800
+  ảnh app thực sự giải mã  : 600×800   → tỉ lệ khớp
+```
+
+Trước khi sửa, `pixelSize` trả `800×600` còn ảnh là `600×800` — lệch tỉ lệ.
+
+**Cách sửa.** Xét `kCGImagePropertyOrientation`; giá trị `5...8` là xoay 90°/270°
+nên đổi hai cạnh.
+
+---
+
+## 12. Widget mờ 25% giữa lúc chuyển ảnh
+
+**Nhận ra.** `crossfade` chạy đồng thời `under: 0→1` và `over: 1→0`. Giữa chừng
+cả hai đều ở 0.5, tổng độ đục là `1 − (1−0,5)(1−0,5)` = **0,75**.
+
+**Đo thế nào (đã chạy).** Không cần chụp màn hình — đo trực tiếp hai lớp. Tổng độ
+đục của hai lớp chồng nhau **chính là** `1 − (1−a)(1−b)`; lấy mẫu `presentation()`
+của cả hai mỗi 4ms suốt lúc chuyển:
+
+```
+92 mẫu, độ đục thấp nhất = 1.0000   (cách cũ: 0.750)
+```
+
+**Cách sửa — có điều kiện mà mô tả ban đầu chưa nói.** Chỉ mờ *một* lớp: đặt lớp
+nhận ảnh mới ở 1.0 **tức thì, không animate**, rồi mờ lớp cũ. Nhưng thứ tự view là
+`imageView` → `topView`, nên lớp nhận ảnh mới **bắt buộc phải nằm dưới** — nếu nó
+ở trên và bật đục tức thì thành cắt hình chứ không chuyển mềm. Vì vậy sau mỗi lần
+chuyển phải đưa lớp đang hiện lên trên, để lần sau lớp trống nằm ở dưới.
+
+---
+
+# Bẫy đo mới của vòng này
+
+Bốn cái này làm tôi **kết luận sai trước khi sửa phép đo**:
+
+| Bẫy | Sai lầm | Cách đúng |
+|---|---|---|
+| Hàm generic ở top-level `main.swift` | `func mir<T>(...)` rồi gọi `mir<NSView>(...)` → *"cannot explicitly specialize global function"*. Trùng tên với hàm global sẵn có cũng báo vậy | Trả `Any?`, ép kiểu ở nơi gọi |
+| `Mirror` không thấy thuộc tính **tính** | `imageInset`/`imageOrigin` là `var` có body → `Mirror` trả nil, tôi tưởng app sai | Tính lại từ khung thật: cửa sổ → container → ảnh |
+| `s2.frame` của **châu** | Răng là subview của nền nền; lấy `frame` thô là toạ độ **của cha**, tôi kết luận "nằm trong nền" rồi hoá ra sai | `s2.convert(s2.bounds, to: viewGốc)` |
+| Chặn main thread chờ callback | `ImageStore.load` bắn completion qua `DispatchQueue.main.async`; `semaphore.wait` ở main → **deadlock**, đo ra ảnh `0×0` và tôi tưởng app giải mã hỏng | Để vòng lặp chạy, không chặn main |
+
+Thêm một: `UIAlert`/thông báo crash của hệ thống không cần — `open` app rồi hỏi
+`pgrep` là biết còn sống hay không, nhanh hơn mở báo cáo.
+
+**Về việc bấm nút tự động.** Thử tái hiện riêng crash của `step()` bằng `CGEvent`
+đã **thất bại**: post sự kiện sang app khác cần quyền Accessibility, và cửa sổ
+chưa kịp hiện. Tôi **không** ghi nhận là đã tái hiện được chỗ đó. Bằng chứng cho
+nhánh `images[-1]` đến từ crash *thật* ở `showPinnedIfNeeded()` — cùng nguyên nhân,
+cùng biểu thức, đã tái hiện trên app thật và xác nhận bằng báo cáo crash.

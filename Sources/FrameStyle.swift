@@ -114,15 +114,30 @@ enum FrameStyle: Int, CaseIterable {
             bg.wantsLayer = true
             bg.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
             bg.layer?.cornerRadius = 4
-            // Rang cua: hai hang lo cham cach nhau doc hai ben trong.
+            // Răng cưa: hai hàng lỗ chấm chạy DỌC hai bên trong.
+            //
+            // Hai lỗi chồng lên nhau ở đây:
+            //
+            // 1. Trục Y: bản cũ đặt `y: r.midY - 8` cố định, còn cả hai bên
+            //    lại tăng theo trục X — 28 lỗ dồn thành một cụm ngang ở giữa.
+            // 2. Hệ toạ độ: răng là **subview của `bg`**, nên khung của nó phải
+            //    tính trong `bg.bounds`. Bản cũ — và cả bản sửa trục Y đầu
+            //    tiên — lấy `r.minX`/`r.maxX`, tức toạ độ của `container`, nên
+            //    mọi lỗ bị dịch đúng bằng `bg.origin` và trượt ra ngoài dải.
+            //
+            // Vì vậy toàn bộ hình học lấy từ `bg.frame`, không lấy từ `r`.
+            let count = max(4, Int(bg.frame.height / 22))
+            let step = bg.frame.height / CGFloat(count)
+            let toothH: CGFloat = 8, toothW: CGFloat = 12, margin: CGFloat = 4
             for side in [true, false] {
-                for k in 0..<14 {
-                    let d = CGFloat(k) * 7
+                for k in 0..<count {
                     let tooth = FrameDecoration(frame: CGRect(
-                        x: side ? r.minX + 4 + d : r.maxX - 7 + d,
-                        y: r.midY - 8, width: 4, height: 16))
+                        x: side ? margin : bg.frame.width - margin - toothW,
+                        y: CGFloat(k) * step + (step - toothH) / 2,
+                        width: toothW, height: toothH))
                     tooth.wantsLayer = true
-                    tooth.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1).cgColor
+                    tooth.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.9).cgColor
+                    tooth.layer?.cornerRadius = 2
                     bg.addSubview(tooth)
                 }
             }

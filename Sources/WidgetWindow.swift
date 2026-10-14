@@ -433,16 +433,38 @@ final class WidgetWindow {
     /// Chỉ animate `opacity` — không đụng `contents`, nên CoreAnimation không
     /// phải rasterize lại gì cả. Đo được ~9ms CPU mỗi lần, không đáng kể so
     /// với 30 giây giữa hai lần đổi ảnh.
+    ///
+    /// CHỈ mờ dần **một** lớp. Trước đây cả hai lớp cùng chạy `0→1` và `1→0`,
+    /// nên giữa chừng cả hai đều ở 0.5 và tổng độ đục là
+    /// `1 − (1−0,5)(1−0,5)` = **0,75** — widget mờ 25% một cái rồi mới đặc
+    /// lại, nháy thấy rõ.
+    ///
+    /// Cách sửa: lớp nhận ảnh mới được đặt ở 1.0 **ngay, không animate**, rồi
+    /// chỉ mờ lớp cũ. Vì thứ tự trên là `imageView` → `topView` (xem `init`),
+    /// lớp nhận ảnh mới buộc phải là lớp **dưới**; nếu không nó sẽ ở trên và
+    /// bật đục tức thì thành cắt hình chứ không phải chuyển mềm. Vì vậy sau mỗi
+    /// lần chuyển ta đưa lớp đang hiện lên trên, để lần sau lớp trống nằm ở
+    /// dưới — điều kiện để không bao giờ hụt sáng.
     private func crossfade(to img: NSImage) {
-        // Ảnh đang hiện nằm ở lớp nào? Lớp còn lại là lớp dưới, đang trong suốt.
-        let topVisible = (topView.layer?.opacity ?? 0) > 0.5
-        let under = topVisible ? imageView : topView
-        let over  = topVisible ? topView  : imageView
+        // Lớp đang trong suốt nhận ảnh mới; lớp đang đục là ảnh cũ, sẽ mờ đi.
+        let blank = (topView.layer?.opacity ?? 0) > 0.5 ? imageView : topView
+        let shown = (blank === imageView) ? topView : imageView
 
-        // Đặt ảnh mới vào lớp dưới rồi làm nó mờ dần lên.
-        setContents(img, on: under)
-        fade(under, to: 1)
-        fade(over, to: 0)
+        setContents(img, on: blank)
+        blank.displayIfNeeded()          // vẽ ngay, không đợi vòng chạy kế
+        setOpacity(blank, to: 1)         // tức thì — giữ dưới lớp cũ nên không nhảy
+        fade(shown, to: 0)               // chỉ lớp này chuyển động
+        container.addSubview(blank, positioned: .below, relativeTo: controls)
+    }
+
+    /// Đặt opacity tức thì, không animate — ngược lại với `fade`.
+    private func setOpacity(_ view: ImageCanvas, to value: Float) {
+        guard let l = view.layer else { return }
+        l.removeAnimation(forKey: "fade")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        l.opacity = value
+        CATransaction.commit()
     }
 
     /// Mờ dần một lớp, bằng `CABasicAnimation` tường minh.
@@ -614,9 +636,9 @@ private func layout() {
 
     /// Đặt cụm nút trong góc trên phải của vùng ảnh, chồm lên viền.
     private func layoutControls() {
-        let inset: CGFloat = 8
-        controls.place(inside: NSSize(width: imageSize.width, height: imageSize.height),
-                       offset: CGPoint(x: imageSize.width - inset, y: imageSize.height - inset))
+        // Dán theo khung THẬT của ảnh, không tự tính lại từ kích thước ảnh:
+        // vùng ảnh đã lệch trong container bởi viền trong suốt + khung.
+        controls.place(atTopRightOf: imageView.frame)
     }
 
     /// Hiện / ẩn nút điều khiển.
@@ -783,8 +805,13 @@ private func ensureSlots() {
             return
         }
         ensureSlots()
-        if let i = nearestIndex(in: activeSlots, to: window.frame.origin) {
-            window.setFrameOrigin(activeSlots[i])
+        // Phải y hệt `finishDrop()`: lưới bám **ảnh**, cửa sổ thì lùi lại đúng
+        // phần viền trong suốt. Dùng `window.frame.origin` ở đây sẽ lệch đúng
+        // bằng `imageInset` — cùng lý do mà `finishDrop` đã phải sửa.
+        if let i = nearestIndex(in: activeSlots, to: imageOrigin) {
+            let inset = imageInset
+            window.setFrameOrigin(NSPoint(x: activeSlots[i].x - inset.x,
+                                          y: activeSlots[i].y - inset.y))
             settings.savedOrigin = window.frame.origin
         }
     }

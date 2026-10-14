@@ -31,7 +31,10 @@ BASE="bench/baseline.txt"
 MODE="${1:-check}"
 
 # Bao nhiêu phút đo RAM. Mặc định 3 — đủ để vài vòng đổi ảnh (chu kỳ 30s).
-MINUTES="${BENCH_MINUTES:-3}"
+# Cửa sổ đo tối thiểu phải trải qua hết đoạn cache LRU đang đầy, nếu không thì
+# trung vị rơi vào giữa đoạn bậc thang và verdict là cái đồng xu.
+# Đo được: với 3 phút, cùng một binary cho median 17.5 (LOI) rồi 9.7 (OK).
+MINUTES="${BENCH_MINUTES:-8}"
 # Ngưỡng cho phép vượt mốc (%). 15% RAM là nới rộng có chủ đích cho việc
 # thỉnh thoảng; vượt là đáng nghi.
 TOL_PCT="${BENCH_TOL:-15}"
@@ -65,9 +68,27 @@ trap 'rm -rf "$HELPER_DIR"' EXIT
 cat > "$HELPER_DIR/wins.swift" <<'SWIFT'
 import CoreGraphics
 import Foundation
-let l = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                   kCGNullWindowID) as? [[String: Any]] ?? []
-print(l.filter { ($0[kCGWindowOwnerName as String] as? String) == "LitePic" }.count)
+
+// Cửa sổ widget ở chế độ "dưới app" nằm ở tầng âm. Trước đây widget dùng
+// `desktopWindow + 20` = -2147483603, đúng bằng tầng desktop icon, và mọi tầng
+// ≤ -2147483602 bị hệ thống xếp thành **desktop element** — `.excludeDesktopElements`
+// loại mất nó, `cw` = 0, vòng chặn khởi động chờ mãi rồi hết giờ và ra
+// `launch_to_window_s = -`. (Đã sửa thành `desktopIcon + 2` = -2147483601.)
+//
+// Nhưng "đã sửa" không có nghĩa là chắc — đó chỉ là **cách đo**, mà cách đo thì
+// đổi được bất cứ lúc nào. Nếu mai mốc phân loại của hệ thống dịch, lại ra
+// `launch = -` và không ai hiểu vì sao.
+//
+// Cách chữa đúng không phải ép cấu hình người dùng, mà làm **phép đo** không thể
+// trượt: đếm bằng bộ lọc chuẩn, và nếu ra 0 thì đếm lại bằng bộ lọc không loại
+// desktop element. Widget chưa hiện thì cả hai đều 0 — vẫn chờ đúng như cũ.
+func count(_ opt: CGWindowListOption) -> Int {
+    let l = CGWindowListCopyWindowInfo([.optionOnScreenOnly, opt],
+                                       kCGNullWindowID) as? [[String: Any]] ?? []
+    return l.filter { ($0[kCGWindowOwnerName as String] as? String) == "LitePic" }.count
+}
+let n = count(.excludeDesktopElements)
+print(n > 0 ? n : count([]))
 SWIFT
 swiftc -O -o "$HELPER_DIR/wins" "$HELPER_DIR/wins.swift" 2>/dev/null || true
 
@@ -76,6 +97,45 @@ count_windows() { [ -x "$HELPER_DIR/wins" ] && "$HELPER_DIR/wins" || echo "-"; }
 pid_of() { pgrep -x LitePic | head -1; }
 
 median() { sort -n | awk '{a[NR]=$1} END {print (NR%2) ? a[(NR+1)/2] : (a[NR/2]+a[NR/2+1])/2}'; }
+
+# --- Chuan hoa cau hinh de phep do co y nghia ---
+#
+# App chay o che do "randomInterval" (mac dinh 15..300 giay). Nghia la TRONG 8
+# phut do, so lan doi anh la **ngau nhien** — moi lan doi giai ma anh moi, LRU
+# nha-giu, footprint nhay bac thang. Do la ly do median cua cung mot binary ma
+# chay 4 lan cho: 13.5 / 14.8 / 17.3 / 18.3 MB. Nghuoc lai, muc 15% khong bat
+# duoc hoi qui that — no bat nhieu nhiem hon hon loi that.
+#
+# Giai phap: tam tat vong doi anh TRONG LUC DO, va **khoi phuc lai** sau do.
+# Do la trang thai dau, khong phai trang thai chay — dung de so sanh hai ban voi
+# nhau, khong dung de so sanh voi muc cu.
+SAVED_RANDOM=""; SAVED_INTERVAL=""
+if [ -n "${BENCH_KEEP_SETTINGS:-}" ]; then
+    echo "  (BENCH_KEEP_SETTINGS: giu nguyen cau hinh nguoi dung)"
+else
+    SAVED_RANDOM="$(defaults read local.litepic.widget randomInterval 2>/dev/null || true)"
+    SAVED_INTERVAL="$(defaults read local.litepic.widget interval 2>/dev/null || true)"
+fi
+restore_settings() {
+    [ -z "$SAVED_RANDOM" ] && return 0
+    defaults write local.litepic.widget randomInterval -int "$SAVED_RANDOM"
+    [ -n "$SAVED_INTERVAL" ] && \
+        defaults write local.litepic.widget interval -float "$SAVED_INTERVAL"
+    # App doc cau hinh luc khoi dong, nen phai mo lai moi thay hieu luc.
+    pkill -x LitePic 2>/dev/null; sleep 1
+    open -a /Applications/LitePic.app 2>/dev/null
+}
+trap 'restore_settings; rm -rf "$HELPER_DIR"' EXIT
+if [ -n "$SAVED_RANDOM" ]; then
+    defaults write local.litepic.widget randomInterval -int 0
+    defaults write local.litepic.widget interval -float 3600
+    echo "==> Tam tat vong doi anh trong luc do (se khoi phuc lai)"
+    # Cho `cfprefsd` kip flush. Ghi xong mo app ngay thì app moi doc duoc gia tri
+    # CU trong cache cua cfprefsd va van chay 15..300s — do duoc: mot lan do cho
+    # chuoi `9.7 9.7 ... 13.3 ... 14.2` (buoc nhay giua chung), lan do thi phang
+    # `9.8` suot 6 phut. Cung ma, khac nhau chi o thoi diem doc cau hinh.
+    sleep 3
+fi
 
 # ---------------------------------------------------------------------------
 # Do
@@ -88,19 +148,43 @@ echo "    pid=$pid"
 
 # --- Thoi gian khoi dong: tu mo app den khi cua so widget xuat hien ---
 echo "==> Do thoi gian khoi dong..."
-( pkill -x LitePic 2>/dev/null; sleep 1 )
-t0=$(python3 -c 'import time;print(time.time())')
-open -a /Applications/LitePic.app
-launch_s=""
-for _ in $(seq 1 200); do
-    p="$(pid_of)"; cw="$(count_windows)"
-    if [ -n "$p" ] && [ "$cw" != "0" ] && [ "$cw" != "-" ]; then
-        launch_s=$(python3 -c "import time;print(f'{time.time()-$t0:.2f}')")
-        break
+# HUC MOT LAN TRUOC KHI TIM.
+#
+# Lần mở ĐẦU sau khi cài bundle mới chạy chậm hơn hẳn: LaunchServices phải đăng ký
+# lại app. Đo được ngay sau `cp -R` vào /Applications là 2.17s, trong khi 8 lần đo
+# sau đó đều ra 0.67-0.78s. Không hứt lần này thì `check` báo LOI launch giả.
+(pkill -x LitePic 2>/dev/null; sleep 1)
+open -a /Applications/LitePic.app; sleep 2
+
+# ĐO NHIỀU LẦN, LẤY TRUNG VỊ.
+#
+# Một lần đo là quá nhiễu cho ngưỡng 15%. Đo được 14 lần trong phiên này:
+# 0.57 / 0.61 / 0.62 / 0.67 / 0.68 / 0.71 / 0.74 / 0.75 / 0.76 / 0.76 / 0.78 /
+# 0.78 / 0.80 / 0.88 — biên độ 0.57→0.88 là **±25%**, lớn hơn ngưỡng. Nên mốc lấy
+# từ một lần đo rất nhanh sẽ khiến mọi lần đo bình thường đều báo LOI.
+# Trung vị của 5 lần thu hẹp được nhiễu này, và lần cuối để app chạy tiếp để đo RAM.
+launch_times=""
+for i in $(seq 1 5); do
+    # Ghi lại trước MỖI lần mở: app đọc cấu hình lúc khởi động, nên lần mở sau
+    # cùng phải thấy giá trị mới chứ không phải giá trị mà cfprefsd còn cache.
+    if [ -n "$SAVED_RANDOM" ]; then
+        defaults write local.litepic.widget randomInterval -int 0
+        defaults write local.litepic.widget interval -float 3600
     fi
-    sleep 0.05
+    (pkill -x LitePic 2>/dev/null; sleep 1)
+    t0=$(python3 -c 'import time;print(time.time())')
+    open -a /Applications/LitePic.app
+    for _ in $(seq 1 200); do
+        p="$(pid_of)"; cw="$(count_windows)"
+        if [ -n "$p" ] && [ "$cw" != "0" ] && [ "$cw" != "-" ]; then
+            launch_times="$launch_times $(python3 -c "import time;print(f'{time.time()-$t0:.2f}')")"
+            break
+        fi
+        sleep 0.05
+    done
 done
 pid="$(pid_of)"; [ -n "$pid" ] || die "app khong len sau khi mo"
+launch_s="$(printf '%s\n' $launch_times | median)"
 [ -n "$launch_s" ] || launch_s="-"
 # Cho app chạy 90s trước khi tính RAM. Con số này không phải tùy ý:
 #
@@ -140,20 +224,37 @@ v = [to_mb(x) for x in open(sys.argv[1]).read().split() if x.strip()]
 if not v:
     print("- - - -"); raise SystemExit
 n = len(v)
-# min/trung vị/max lấy trên TOÀN BỘ mẫu.
-lo, med, hi = min(v), sorted(v)[n//2], max(v)
-# Slope chỉ lấy phần ĐUÔI của đường mẫu — bỏ 25% đầu, vì đoạn đầu còn thuộc về
-# warm-up (cache LRU đang đầy). Tính cả đường mẫu sẽ ra "rò rỉ" giả: app thật
-# phẳng 17.1MB suốt 7 phút, nhưng đoạn lên 10.7 -> 25.4 làm slope ra cộng.
-t = v[max(1, int(n * 0.25)):] if n >= 6 else v
+# Trạng thái đi ngang = phần đuôi, nhưng KHÔNG cắt cứng theo phần trăm.
+#
+# Footprint của app không lên dần đều rồi phẳng, mà **nhảy một bước** (~3MB) tại
+# thời điểm không xác định rồi mới đi ngang. Đo được: các lần chạy khác nhau, bước
+# xảy ra ở phút thứ 2.5, hoặc trước cửa sổ đo, hoặc không xảy ra trong 8 phút —
+# và median nhảy 9.9 ↔ 13.6 giữa các lần. Cắt cứng 25% thì không cứu được: bước
+# có thể rơi vào giữa lát cắt.
+#
+# Cách trích: bỏ mọi mẫc trước khi chuỗi chạm 95% đỉnh cuối. Nghĩa là đo trạng
+# thái đã ổn định — đúng câu hỏi "chạy lâu còn tồn tại bao nhiêu".
+#
+# KHÔNG bỏ nhầm rò rỉ: rò rỉ là đi **liên tục**, không bao giờ chạm đỉnh sớm, nên
+# gần như toàn bộ mẫu được giữ lại — và `slope` bắt được. `slope` vẫn tính trên
+# lát cắt này.
+peak = max(v)
+flat_start = next((i for i, x in enumerate(v) if x >= peak * 0.95), 0)
+t = v[flat_start:] if len(v) - flat_start >= 4 else v
 m = len(t)
+lo, med, hi = min(t), sorted(t)[m//2], max(t)
 xs = list(range(m)); mx = sum(xs)/m; my = sum(t)/m
 den = sum((x - mx) ** 2 for x in xs)
 slope = (sum((x - mx) * (y - my) for x, y in zip(xs, t)) / den * 4) if den else 0.0
 print(f"{lo:.1f} {med:.1f} {hi:.1f} {slope:+.2f}")
+# In thêm nguyên đường mẫu. Theo quy tắc trong BUGS.md, phải nhìn cả chuỗi mốc
+# theo thời gian mới phân biệt được "rò rỉ" với "LRU nhả-giữ" — chỉ một con số
+# tổng thì không đủ, và chính nó đã báo LOI oan một lần.
+print("SERIES " + " ".join(f"{x:.1f}" for x in v))
 PY
 )
-read -r ram_min ram_med ram_max ram_slope <<< "$ram_line"
+read -r ram_min ram_med ram_max ram_slope <<< "$(printf '%s\n' "$ram_line" | sed -n 1p)"
+ram_series="$(printf '%s\n' "$ram_line" | sed -n 2p | sed 's/^SERIES //')"
 
 # --- CPU luc nghi, do bang chenh lech thoi gian CPU (diem 1 o tren) ---
 echo "==> Do CPU luc nghi (60s, app da am)..."
@@ -185,6 +286,9 @@ echo "launch_to_window_s             $launch_s"
 echo "threads                        $threads"
 echo "windows                        $wins"
 echo "gpu                            $gpu"
+echo
+echo "chuoi moc RAM (${MINUTES} phut, 15s/gap):"
+echo "  $ram_series"
 echo
 
 snapshot() {
@@ -246,7 +350,6 @@ for k in b:
         print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  {mark}")
     else:
         print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  (chi de doc)")
-    if k not in GATE and False: bad.append(k)
 print()
 if warn:
     print("NHAC — cac moc sau GIAM manh so voi moc. Thường là tin vui, nhưng "

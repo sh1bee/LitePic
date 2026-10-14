@@ -135,11 +135,85 @@ Hai bẫy nữa, không thuộc về đo số:
 Mỗi thay đổi nhỏ (đổi cách vẽ, thêm một lớp, đổi công thức lưới) nên chạy
 `check` trước khi commit. Nếu vượt, đã biết ngay thứ vừa làm nặng thêm.
 
-**Kết luận hiện tại: KHÔNG rò rỉ.** Đo 8 phút, 32 mốc:
+### Bộ đo phải "ổn định" trước khi nó đáng tin
+
+Một `check` báo LOI thì **không đủ** để kết luận app nặng lên — phải hỏi ngược lại:
+số đó có thật không, hay chính bộ đo đang nhiễu. Ở đây đã dính đúng một vụ, và nó
+dẫn tới ba sửa trong chính `bench.sh`:
+
+**1. Đo lúc app đang đổi ảnh thì con số là cái đồng xu.** Cấu hình mặc định của
+app là `randomInterval` = ngẫu nhiên **15–300 giây** (khoá `interval` cố định bị
+bỏ qua hoàn toàn khi bật random). Trong 8 phút đo, số lần đổi ảnh là ngẫu nhiên,
+mỗi lần giải mã ảnh mới → LRU nhả-giữ → footprint nhảy bậc thang.
 
 ```
-19.4 19.4 19.4 20.5 17.1 17.1 17.1 17.1 ... 17.1   ← phẳng tuyệt đối 7+ phút
+cùng một binary, cùng 8 phút, 4 lần chạy:
+  median 9.9 / 13.5 / 14.2 / 15.3 MB      ← tất cả đều "đúng", không có binary nào khác
 ```
+
+Cách chữa: **tạm tắt vòng đổi ảnh trong lúc đo, và khôi phục lại sau đó** (biến
+`SAVED_RANDOM`/`SAVED_INTERVAL` + `trap`). Đây là trạng thái *đầu*, dùng để so hai
+bản với nhau — không phải trạng thái *chạy*, nên đừng so mốc này với cảm nhận
+thường ngày. Muốn giữ nguyên cấu hình thì chạy với `BENCH_KEEP_SETTINGS=1`.
+
+**2. `cfprefsd` cache, nên ghi xong phải chờ.** Ghi `defaults` rồi mở app ngay thì
+app đọc **giá trị cũ** trong cache của `cfprefsd` và vẫn chạy 15–300s. Cùng mã,
+cùng phép đo, kết quả `9.7 … 13.3 … 14.2` (có bước nhảy) ở lần này và `9.8` phẳng
+suốt 6 phút ở lần kế — khác nhau **chỉ ở thời điểm đọc cấu hình**. Vì vậy `bench.sh`
+ghi lại trước *mỗi* lần mở và nghỉ 3s sau lần ghi đầu.
+
+**3. Một lần đo launch quá nhiễu cho ngưỡng 15%.** 14 lần đo trong một phiên:
+`0.57 / 0.61 / 0.62 / 0.67 / 0.68 / 0.71 / 0.74 / 0.75 / 0.76 / 0.76 / 0.78 /
+0.78 / 0.80 / 0.88` — biên độ **±25%**, lớn hơn ngưỡng. Mốc lấy từ một lần rất
+nhanh thì mọi lần đo bình thường đều LOI. Nay đo **5 lần, lấy trung vị**.
+Riêng lần mở **đầu tiên sau khi cài** còn chậm hơn nữa (LaunchServices phải đăng
+ký lại): đo được `2.17s` ngay sau `cp -R` vào `/Applications`. `bench.sh` hứt một
+lần trước khi bắt đầu đo.
+
+### Cách trích "trạng thái đi ngang"
+
+Footprint **không lên đều rồi phẳng**, mà **nhảy một bước** (~3MB) tại thời điểm
+không xác định rồi mới đi ngang — cửa sổ đo có thể rơi vào trước hoặc sau bước đó.
+Cắt cứng "bỏ 25% đầu" không cứu được, vì bước có thể rơi vào giữa lát cắt.
+
+Cách dùng hiện tại: **bỏ mọi mẫc trước khi chuỗi chạm 95% đỉnh cuối**. Đây là
+trạng thái đã ổn định — đúng câu hỏi "chạy lâu còn tồn tại bao nhiêu".
+
+Nó **không** bỏ sót rò rỉ: rò rỉ đi *liên tục*, không bao giờ chạm đỉnh sớm, nên
+gần như toàn bộ mẫu được giữ lại và `slope` bắt được.
+
+### Khi nào tin được phép đo, khi nào phải đo A/B
+
+Nếu `check` báo LOI ở **RAM hoặc launch**, hãy chạy lại trước. Còn muốn so **hai
+bản build**, đừng so hai lần `check` rời rạc — hãy **xoay vòng A/B với cùng một
+cửa sổ**:
+
+```bash
+./ab.sh truoc <app-bản-cũ> 20     # mỗi bản một lần, 20 mốc, cùng điều kiện
+./ab.sh sau   <app-bản-mới> 20
+```
+
+Chính tôi đã kết luận sai ở đây: một vòng cho thấy bản mới leo tới 21.2 MB còn
+bản cũ phẳng 14.8 — tưởng 7 sửa đổi gây hồi quy. Lặp lại thì **cả hai** đều leo
+tới ~19–20. Chỉ khi lặp lại mới biết cái nào là nhiễu.
+
+**Kết luận sau khi sửa bộ đo: KHÔNG rò rỉ, và KHÔNG hồi quy.** Đo 8 phút, 32 mốc,
+biến động 0.1 MB:
+
+```
+9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8
+9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8
+slope = +0.00
+```
+
+Về **7 lỗi đã sửa**: A/B hai lần, mỗi bản 20 mốc, cùng cửa sổ — `truoc`
+(1b53191) và `sau` (168bdec) cho median lần lượt 14.8/13.5 và 17.3/13.7, tức
+**không phân biệt được**, nằm trong biên độ nhiễu. Cùng kết luận cho `build.sh`
+`-target`: bản cũ `minos 15.0` median 13.6, bản mới `minos 13.0` median 12.4.
+
+**Nhưng `build.sh` từng build ra `minos 15.0` trong khi `Info.plist` khai
+`LSMinimumSystemVersion = 13.0`** — app sẽ không chạy trên macOS 13/14 dù tự khai
+là chạy được. Nay đã ghim `-target`. Đây là lỗi thật, không phải chuyện thẩm mỹ.
 
 Mỗi lần đo lại bộ đo đã dính và tự sửa các lỗi sau — đừng viết lại từ đầu:
 

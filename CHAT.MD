@@ -331,3 +331,134 @@ threads             3    → 3
 
 Không hồi quy. Số luồng không đổi dù thêm `DispatchQueue.main.async` — đo mới tin,
 đoán thì không.
+
+---
+
+## 8. Đợt 14/10 (tiếp): ba điểm rà soá, và bài học lớn nhất của dự án
+
+Ba điểm được nêu: test dính đường dẫn cứng, `build.sh` không ghim target, và
+`bench.sh` có dead code + bẫy đếm cửa sổ. Tất cả đều đúng — **nhưng phần "đúng"
+này dẫn tới một sai lầm lớn hơn nhiều**.
+
+### Hai trong ba: đúng, và sửa xong thì phải đo lại từ đầu
+
+**Đường dẫn cứng trong test.** Đúng. Tôi tự tạo ảnh JPEG trong thư mục tạm rồi
+chạy lại: 28/28 vẫn đạt, dù ảnh giả 400×300 khác tỉ lệ ảnh thật.
+
+Nhưng lần đầu tôi "chứng minh" bằng cách chạy test với `HOME` trỏ vào thư mục
+giả — và **bản cũ vẫn chạy qua**. Vì `NSHomeDirectory()` trên macOS đọc từ cơ sở
+dữ liệu mật khẩu chứ không đọc `$HOME`. Phép chứng minh của tôi **không có giá
+trị**, suýt thành bằng chứng ngược. Chạy lại bằng cách chạy đúng hai dòng code cũ
+trỏ tới thư mục không tồn tại: `exit 132` — SIGILL, `try!` trap đúng như báo cáo.
+
+**`build.sh` không ghim target.** Đúng, và nặng hơn tưởng:
+
+```
+bản cũ:  minos 15.0      ← swiftc lấy target theo máy đang build
+bản mới: minos 13.0      ← đã ghim, khớp LSMinimumSystemVersion
+```
+
+Tức app từng **không chạy được trên macOS 13/14** dù `Info.plist` khai là chạy
+được. Sửa bằng `-target $(uname -m)-apple-macos13.0`.
+
+Một chỗ tôi **không** sửa theo lập luận đưa ra: "rm -rf không xoá sạch inode bị
+lock, WindowServer giữ cache chữ ký". Trên macOS `rm -rf` xoá được nhị phân đang
+chạy — tiến trình giữ inode cũ, chuyện đó không gây lỗi. Cái thật sự gây hiểu
+nhầm là **bản đang chạy vẫn thực thi mã cũ**: build xong, `cp` sang
+`/Applications`, mở lên thấy y hệt, tưởng sửa không ăn. `pkill` trước khi build
+thì đúng mục đích, nhưng phải ghi đúng lý do — nếu ghi sai lý do thì lần sau rắc
+rối lại sẽ sửa nhầm.
+
+**Bẫy đếm cửa sổ.** Đây là chỗ **suy đoán đúng, nhưng không còn thành vấn đề**.
+Ở chế độ dưới app, helper của `bench.sh` trả về `2` — 10/10 lần — vì bản sửa tầng
+đã đưa widget lên `-2147483601`, trên ngưỡng desktop element. Nên tôi **không** làm
+`defaults write levelMode -int 1`: làm vậy là **sửa cấu hình của người dùng**, và
+còn đo nhầm — mốc phải phản ánh cấu hình thật. Thay vào đó vá **phép đo** cho
+không thể trượt: đếm bằng bộ lọc chuẩn, ra 0 thì đếm lại không loại desktop.
+
+### Bài học lớn: `bench.sh` báo LOI, và tôi gần như tin nó
+
+Sau khi sửa 7 lỗi, chạy `check`: **RAM median 17.5 MB so với mốc 9.5, +84%, LOI**,
+kèm `slope +1.53 MB/phút` — đúng chữ ký rò rỉ. Trong hai phút, bốn lần đo, tôi
+đã viết vào `BUGS.md` rằng không hồi quy.
+
+Run lại: `9.7 MB, OK`. Cùng binary, cùng mốc.
+
+Tôi đã sai ở chỗ quen thuộc nhất của dự án này: **kết luận từ phép đo mà chưa hỏi
+phép đo có đáng tin không.**
+
+Đào ra nguyên nhân, từng bước:
+
+1. Xem chuỗi mốc (đúng bài học cũ) → dao động `10.8 ↔ 16.2`, **không** có xu hướng
+   tăng. Không phải rò.
+2. Giữ màn hình không ngủ bằng `caffeinate` → vẫn dao động. Không phải ngủ/tỉnh.
+3. Đếm sự kiện FSEvents trong 120s → **0**. Không phải quét lại thư mục.
+4. Đọc cấu hình → `randomInterval = 1`, còn `minInterval`/`maxInterval` **chưa đặt**
+   nên mặc định **15 và 300 giây**. Nghĩa là `interval = 1800` của người dùng bị
+   **bỏ qua hoàn toàn**, và app đổi ảnh ngẫu nhiên mỗi 15–300s. Mỗi lần đổi =
+   giải mã ảnh mới = LRU nhả-giữ = đúng nhịp bậc thang tôi đo được.
+
+Đó là **cấu hình của chính người dùng**, không phải lỗi. Và nó có nghĩa là con số
+trung vị vốn dĩ là cái đồng xu:
+
+```
+cùng một binary, cùng 8 phút, 4 lần chạy:
+  median 9.9 / 13.5 / 14.2 / 15.3 MB
+```
+
+Ngưỡng 15% trên một số biên độ 55% thì bắt nhiễu nhiều hơn bắt lỗi thật.
+
+### Ba sửa trong chính bộ đo
+
+- **Tạm tắt đổi ảnh khi đo, rồi khôi phục** (biến `SAVED_*` + `trap`). Đây là
+  trạng thái *đầu* — dùng để so hai bản, không phải trạng thái *chạy*.
+- **`cfprefsd` cache.** Ghi `defaults` xong mở app ngay thì app đọc **giá trị cũ**
+  và vẫn chạy 15–300s. Cùng mã, lần này `9.7 … 13.3 … 14.2`, lần kia `9.8` phẳng
+  6 phút — khác nhau *chỉ* ở thời điểm đọc cấu hình. Nay ghi trước **mỗi** lần mở.
+- **Đo launch 5 lần, lấy trung vị.** 14 lần đo được `0.57 … 0.88`, biên độ ±25%
+  — lớn hơn ngưỡng. Thêm bẫy nữa: lần mở **đầu tiên sau khi cài** ra `2.17s`
+  (LaunchServices phải đăng ký lại bundle). Nay hứt một lần trước khi đo.
+
+Và cách trích trạng thái đi ngang: **bỏ mọi mẫc trước khi chuỗi chạm 95% đỉnh
+cuối**. Cắt cứng "bỏ 25% đầu" không cứu được vì bước nhảy rơi ở thời điểm không
+xác định. Nó không bỏ sót rò rỉ: rò rỉ đi liên tục, không bao giờ chạm đỉnh sớm.
+
+Kết quả sau khi sửa bộ đo — 32 mốc/8 phút, **biến động 0.1 MB**:
+
+```
+9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 9.8 ...
+slope = +0.00
+```
+
+### Về việc "sửa 7 lỗi có làm app nặng lên không"
+
+Đây mới là câu hỏi thật, và tôi trả lời sai **hai lần** trước khi trả lời đúng.
+
+Vòng 1: bản cũ phẳng 14.8, bản mới leo tới 21.2 → kết luận 7 sửa đổi gây hồi
+quy. Vòng 2 (lặp lại): **cả hai** đều leo tới 19–20. Vậy vòng 1 mới là ngoại lệ.
+
+Tôi đã viết kết luận "không hồi quy" vào `BUGS.md` **trước khi** lặp lại. Chỉ
+lặp lại mới biết cái nào là nhiễu.
+
+Sau khi bộ đo ổn định:
+
+| so sánh | trước | sau |
+|---|---|---|
+| 7 sửa lỗi (1b53191 vs 168bdec) | median 14.8 / 13.5 | 17.3 / 13.7 — không phân biệt được |
+| `build.sh -target` | 13.6 | 12.4 |
+
+> **So hai bản build thì phải xoay vòng A/B với cùng cửa sổ đo, không so hai lần
+> `check` rời rạc.** Và phải lặp lại trước khi tin kết luận âm — "không thấy hồi
+> quy" cũng là một kết luận, và nó cũng cần bằng chứng.
+
+### Tự sửa: tôi đã làm hỏng `bench.sh` giữa chừng
+
+Một lần tôi đặt `oldString` sai, `edit` khớp nhầm chỗ, và nó **xoá mất khối tính
+toán rồi chèn sai khối khác vào**. `bash -n` báo lỗi cú pháp — may mà có kiểm tra.
+Khôi phục bằng `git checkout` rồi làm lại từng bước, mỗi bước `bash -n`.
+
+Cũng có lần tôi sửa một dòng "không đổi gì" và nó **nhân bản** dòng đó lên hai
+bản. Một sửa không đổi gì mà sinh ra thay đổi — loại sai mà `git diff` mới bắt
+được, chứ không phải đọc code.
+
+> **Sửa "không đổi gì" là loại sửa nguy hiểm nhất:** dễ tin là vô hại, dễ để sót.

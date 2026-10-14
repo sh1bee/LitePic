@@ -21,6 +21,8 @@
 //      Phai drain hang doi truoc moi tinh huong.
 import AppKit
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // Kiểm thử kéo thật cho DragSession — chạy trên vòng lặp sự kiện thật, không
 // phải gọi hàm nội bộ. Mỗi tình huống tạo widget mới để không dính trạng thái.
@@ -34,10 +36,51 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 Settings.shared.levelMode = .floating
 
-let dir = NSHomeDirectory() + "/Downloads/alime/wallpaper/real dáng say"
-let img = ((try! FileManager.default.contentsOfDirectory(atPath: dir))
-    .first { $0.hasSuffix(".jpg") })!
-let imageURL = URL(fileURLWithPath: dir + "/" + img)
+/// Sinh ảnh JPEG thử riêng trong thư mục tạm.
+///
+/// Trước đây bộ test trỏ thẳng vào thư mục ảnh thật của máy và dùng `try!` +
+/// ép `!`. Dọn Downloads, đổi tên thư mục hay chạy trên máy khác là **crash
+/// ngay ở dòng đầu tiên** của bộ test — và crash ở đó thì không phân biệt được
+/// với lỗi thật của app.
+///
+/// Ảnh màu xanh đặc 400×300 là đủ: các phép thử kéo-thả chỉ so **vị trí quy đổi
+/// sang ô lưới** (tương đối, không phụ thuộc cỡ ảnh), còn hồi quy "ảnh còn mất
+/// không" đo `image != nil` chứ không đo pixel — nên không cần ảnh có chi tiết.
+///
+/// Ghi lại khi file thiếu HOẶC đọc ra sai kích thước. Như vậy lần chạy thường
+/// không đụng mtime, không sinh rác cache đĩa (`ImageStore.cacheKey` khoá theo
+/// path + mtime + size), mà vẫn tự chữa nếu lần trước bị đứt giữa chừng.
+func makeDummyTestImage() -> URL {
+    let url = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("litepic-dragtest.jpg")
+    let want = CGSize(width: 400, height: 300)
+
+    if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+       let img = CGImageSourceCreateImageAtIndex(src, 0, nil),
+       img.width == Int(want.width), img.height == Int(want.height) {
+        return url            // đã có bản tốt — giữ nguyên để không đổi mtime
+    }
+
+    let cs = CGColorSpaceCreateDeviceRGB()
+    let ctx = CGContext(data: nil, width: Int(want.width), height: Int(want.height),
+                        bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    // Nửa trên đỏ, nửa dưới xanh: nếu có lúc nào ảnh bị xoay nhầm thì nhìn thấy
+    // ngay bằng mắt, thay vì xanh một màu không phân biệt được chiều.
+    ctx.setFillColor(CGColor(red: 1, green: 0.2, blue: 0.2, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: want.height / 2, width: want.width, height: want.height / 2))
+    ctx.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 1, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: want.width, height: want.height / 2))
+
+    let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)!
+    CGImageDestinationAddImage(dest, ctx.makeImage()!, nil)
+    guard CGImageDestinationFinalize(dest) else {
+        fatalError("khong gia lai duoc anh thu: \(url.path)")
+    }
+    return url
+}
+
+let imageURL = makeDummyTestImage()
 
 /// Ghi lai moi su kien callback cua mot widget, dong thoi van chay wiring goc.
 final class Recorder {

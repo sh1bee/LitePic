@@ -326,13 +326,25 @@ app đã hỏng chứ không phải tối ưu hơn. Chỉ ba mốc được phá
 (`cpu_idle_pct`, `ram_footprint_mb_median`, `launch_to_window_s`); `min`/`max`/
 `slope` chỉ để đọc vì chúng quá nhiễu.
 
+**Trong lúc đo, `bench.sh` tạm tắt vòng đổi ảnh rồi khôi phục lại.** Mặc định app
+đổi ảnh ngẫu nhiên mỗi 15–300s, nên số lần đổi ảnh trong một cửa sổ đo là ngẫu
+nhiên và footprint nhảy bậc thang — cùng một binary mà median chạy từ 9.9 tới
+15.3 MB. Cần đo đúng trạng thái cấu hình của bạn thì chạy `BENCH_KEEP_SETTINGS=1
+./bench.sh run` (khi đó phải tự hiểu con số là lúc đổi ảnh, không phải lúc đứng
+yên).
+
+**Nếu `check` báo LOI ở RAM hoặc launch, hãy chạy lại trước khi tin.** Ngưỡng 15%
+chỉ có nghĩa khi phép đo lặp lại được. Muốn so **hai bản build**, đừng so hai
+lần `check` rời rạc — hãy **xoay vòng A/B với cùng cửa sổ đo** (xem `BUGS.md` mục
+4). Một lần đo lệch đã khiến tôi kết luận sai rằng 7 sửa đổi gây hồi quy.
+
 | Trạng thái | Kết quả |
 |---|---|
 | Rảnh (đo lúc đã ấm) | CPU **0.00 – 0.03%** |
-| Rảnh — footprint | **phẳng 9.5 – 10 MB**, không leo |
-| Rò rỉ | **không có** — đo 8 phút liên tục, đường đo phẳng tuyệt đối |
+| Rảnh — footprint | **9.8 MB phẳng**, biến động 0.1 MB / 8 phút |
+| Rò rỉ | **không có** — `slope = +0.00` |
 | Số luồng | 4 |
-| Mở app → có cửa sổ | 0.61s |
+| Mở app → có cửa sổ | 0.8s (trung vị của 5 lần) |
 | Đổi ảnh (crossfade) | ~9 CPU ms mỗi lần |
 
 **Không rò rỉ — và cách chứng minh.** Tổng và `slope` không phân biệt nổi "rò rỉ"

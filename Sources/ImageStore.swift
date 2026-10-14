@@ -31,12 +31,26 @@ enum ImageStore {
     /// ở mức 1280px; vượt ngưỡng thì xoá bản cũ nhất.
     private static let diskCap: Int64 = 64 * 1024 * 1024
 
-    private static let cacheDir: URL = {
+    private static let defaultCacheDir: URL = {
         let d = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("LitePic", isDirectory: true)
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }()
+
+    /// Bộ test trỏ cache sang thư mục tạm.
+    ///
+    /// Không có nó thì phép thử "xoá cache lúc đang giải mã" xoá luôn cache thật
+    /// của người dùng. Hậu quả đo được, không phải giả định: sau một lần chạy
+    /// test, footprint đi ngang của app nhảy từ **9.8 lên 21.0 MB**. Lý do nằm
+    /// ngay trong `load()` — đọc cache đĩa thì không tốn gì, còn giải mã ảnh gốc
+    /// 4K thì tăng ~7 MB **vĩnh viễn** do bộ giải mã ImageIO giữ bộ đệm. Xoá
+    /// cache một lần là app phải giải mã gốc ở mọi lần chạy sau, và mọi phép đo
+    /// hiệu năng về sau đều bị thổi lên ~11 MB — cũng tức là mốc đo cũ không còn
+    /// dùng được nữa.
+    static var cacheDirOverride: URL?
+
+    static var cacheDir: URL { cacheDirOverride ?? defaultCacheDir }
 
     // MARK: - Đồng bộ
 

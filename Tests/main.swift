@@ -494,8 +494,13 @@ do {
     let dir = makeDummyTestImage().deletingLastPathComponent()
     let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
         .filter { $0.hasSuffix(".jpg") }.sorted().map { dir.appendingPathComponent($0) }
-    let cacheDir = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Library/Caches/LitePic")
+    // Cache riêng cho test. KHONG duoc dung cache that cua nguoi dung: xoa no
+    // se lam app phai giai ma anh goc 4K o nhung lan chay sau, va do bi thoi
+    // len ~11 MB. Xem `ImageStore.cacheDirOverride`.
+    let cacheDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("litepic-test-cache", isDirectory: true)
+    try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+    ImageStore.cacheDirOverride = cacheDir
 
     // Ban nhip nhieu luot nap roi xoa cache xen ke — truoc day day la cuoc dua tren
     // dia giua `writeCache` (tren decodeQueue) va `removeItem` (tren luong menu).
@@ -513,6 +518,8 @@ do {
     let exists = FileManager.default.fileExists(atPath: cacheDir.path, isDirectory: &isDir)
     line(exists && isDir.boolValue, "thu muc cache van con sau khi xoa rac",
          cacheDir.path)
+    ImageStore.cacheDirOverride = nil
+    try? FileManager.default.removeItem(at: cacheDir)
 }
 
 // ============================================================

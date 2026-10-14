@@ -320,8 +320,9 @@ Bộ test nằm ở `Tests/main.swift`, chạy bằng `./test.sh`.
 Chạy `check` trước mỗi lần commit một thay đổi nhỏ. Vượt ngưỡng là biết ngay
 thứ vừa làm nặng thêm, thay vì vài tuần sau mới thấy app nặng.
 
-`check` **hai chiều**: nặng hơn 15% thì báo `LOI` và thoát mã 1; nhẹ hơn 15% thì
-báo `NHAC` chứ không chặn — giảm là tin vui, nhưng giảm mạnh thường có nghĩa là
+`check` **hai chiều**, với **ngưỡng riêng cho từng mốc** theo đúng nhiễu đo được
+(CPU 15%, RAM 40%, launch 25% — xem `BUGS.md` mục 18 để biết vì sao 15% không dùng
+được cho RAM): nặng hơn thì báo `LOI` và thoát mã 1; nhẹ hơn thì — giảm là tin vui, nhưng giảm mạnh thường có nghĩa là
 app đã hỏng chứ không phải tối ưu hơn. Chỉ ba mốc được phán đạt/thông báo
 (`cpu_idle_pct`, `ram_footprint_mb_median`, `launch_to_window_s`); `min`/`max`/
 `slope` chỉ để đọc vì chúng quá nhiễu.
@@ -341,7 +342,8 @@ lần `check` rời rạc — hãy **xoay vòng A/B với cùng cửa sổ đo**
 | Trạng thái | Kết quả |
 |---|---|
 | Rảnh (đo lúc đã ấm) | CPU **0.00 – 0.03%** |
-| Rảnh — footprint | **9.8 MB phẳng**, biến động 0.1 MB / 8 phút |
+| Rảnh — footprint | **9.6 – 15.8 MB**, phẳng trong mỗi lần đo; xem mục 18 |
+| Rành giữa hai lần chạy | dao động do trúng/trượt cache đĩa, không phải rò |
 | Rò rỉ | **không có** — `slope = +0.00` |
 | Số luồng | 4 |
 | Mở app → có cửa sổ | 0.8s (trung vị của 5 lần) |

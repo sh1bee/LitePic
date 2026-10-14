@@ -569,3 +569,52 @@ chứ không phải sự kiện chuột. Sửa bằng cách cho hết giờ rồ
 
 > **Bài học đã lặp lại lần thứ hai:** đo xong phải hỏi "phép đo này có đang đo đúng
 > thứ không" trước khi tin kết luận.
+
+---
+
+## 18. Ván đẳng RAM dao động 9.6 ↔ 15.8 MB giữa hai lần chạy — và ngưỡng 15% vô nghĩa
+
+Phát ra khi chạy `bench.sh` sau đợt sửa 5 lỗi: `check` báo LOI (+114%). Đây là
+**cùng cái bài cũ** ở dạng tinh vi hơn — phép đo nhiễu, không phải app nặng.
+
+A/B hai bản build, cùng thủ tục đo:
+
+| bản | ván đẳng (median) |
+|---|---|
+| trước 5 sửa đổi (d64ffd4) | 11.4 |
+| sau 5 sửa đổi | 11.2 |
+
+**Không hồi quy.** Nhưng cùng binary đó, hai lần chạy liên tiếp cho **15.8 rồi
+9.6** — chênh 39%, biên độ 65%.
+
+**Nguyên nhân đo được, nằm ngay trong code.** `ImageStore.load()` ghi sẵn:
+
+> mỗi lần giải mã ảnh gốc 4K làm tiến trình tăng ~7 MB và **không bao giờ xuống
+> lại** — bộ giải mã ImageIO giữ lại bộ đệm giải mã đầy đủ.
+
+Nên ván đẳng phụ thuộc vào việc lần khởi động đó **trúng cache đĩa hay phải giải
+mã gốc**. Trúng thì ~9.6, trượt thì ~15.8. Đây là thuộc tính thật của app, không
+phải hỏng.
+
+Hệ quả trực tiếp: **ngưỡng 15% trên `ram_footprint_mb_median` bắt nhiễu nhiều hơn
+bắt lỗi thật.** Nên `bench.sh` nay đặt ngưỡng **riêng cho từng mốc**, theo đúng
+nhiễu đo được, và in ra cạnh verdict để ai cũng thấy:
+
+| mốc | ngưỡng | cơ sở |
+|---|---|---|
+| `cpu_idle_pct` | 15% | nhiễu ~0 |
+| `ram_footprint_mb_median` | **40%** | cùng binary cho 9.6 ↔ 15.8 (biên độ 65%) |
+| `launch_to_window_s` | **25%** | 14 mẫu trong một phiên: 0.57–0.88s; bước đo 0.05s |
+
+Muốn siết lại thì sửa biến `TOL` trong `bench.sh` — nhưng phải hiểu rằng với
+ngưỡng 15% thì công cụ sẽ báo LOI oa khoảng một nửa số lần.
+
+### Một hệ quả nữa: đừng cho phép thử đụng vào trạng thái thật
+
+Phép thử mới "xoá cache lúc đang giải mã" ban đầu trỏ thẳng vào
+`~/Library/Caches/LitePic`. Nó xoá cache thật của người dùng, và mọi phép đo sau
+đó bị thổi lên ~11 MB — tức là chính phép thử làm hỏng mốc đo.
+
+Đã thêm `ImageStore.cacheDirOverride` để bộ test trỏ sang thư mục tạm. Nguyên tắc
+chung, đúng như mục 1: **bộ test không được để lại thay đổi ở thế giới thật.**
+

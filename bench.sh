@@ -314,6 +314,10 @@ case "$MODE" in
         python3 - "$BASE" "$now" "$TOL_PCT" <<'PY'
 import sys
 base_p, now_p, tol = sys.argv[1], sys.argv[2], float(sys.argv[3])
+# Nguong rieng tung moc — xem giai thich o noi dung `TOL.get(k, tol)`.
+TOL = {"cpu_idle_pct": 15.0,
+       "ram_footprint_mb_median": 40.0,
+       "launch_to_window_s": 25.0}
 def load(p):
     d = {}
     for line in open(p):
@@ -334,6 +338,21 @@ for k in b:
     if k not in n: continue
     old, cur = b[k], n[k]
     pct = 100 * (cur - old) / old if old else 0
+    # Nguong RIENG cho tung moc, dat theo nhieu do duoc — khong phai mot con so
+    # chung cho ca bang.
+    #
+    # Lý do: 15% chi co y nghia khi phep do lap lai duoc. Da do:
+    #   - ram_footprint_mb_median: cung mot binary, hai lan chay lien tiep cho
+    #     15.8 roi 9.6 MB — chenh 39%, bien do 65%. Ly do la cache dia: lan
+    #     trung gap thi app doc ban thumbnail nho, lan trượt thi giai ma anh goc
+    #     4K, va bo giai ma ImageIO giu lai bo dem ~7 MB vinh vien (ghi ro ngay
+    #     trong `ImageStore.load`). Day khong phai loi cua app.
+    #   - launch_to_window_s: 14 mau trong mot phien cho 0.57 ... 0.88s. Voi
+    #     trung vi 5 lan, buoc do phan giai 0.05s van chua du de phan biet 0.5
+    #     voi 0.6.
+    #   - cpu_idle_pct: nhieu ~0, 15% la qua rong nhung cung rat an toan.
+    #
+    # Muon siet lai: sua TOL trong file nay — nhung nho doc phieu do ben canh.
     if k in GATE:
         # Hai chiều, nhung khac nhau:
         #   NANG HON  -> loi that, phai chan.
@@ -341,13 +360,14 @@ for k in b:
         #                thuong dau hien app da hong (khong tai anh nua, hay do
         #                sai khac) chu khong phai toi uu hoa — nen phai noi ra
         #                chu khong bo qua im lang.
-        if pct > tol:
+        t = TOL.get(k, tol)
+        if pct > t:
             bad.append(k); mark = "LOI"
-        elif pct < -tol:
+        elif pct < -t:
             warn.append(k); mark = "NHAC"
         else:
             mark = "OK"
-        print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  {mark}")
+        print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  {mark} (nguong {t:g}%)")
     else:
         print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  (chi de doc)")
 print()

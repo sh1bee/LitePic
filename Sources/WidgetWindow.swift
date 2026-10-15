@@ -444,9 +444,15 @@ final class WidgetWindow {
     /// `ImageCanvas` tự tính phép vỉa cắt trong `draw(_:)` nên ở đây chỉ cần
     /// tra ảnh vào và bảo nó vẽ lại. Phần Retina do AppKit lo trong `draw`.
     private func refreshImageLayer() {
-        setContents(currentImage, on: imageView)
-        imageView.layer?.opacity = 1
-        topView.layer?.opacity = 0
+        let active = (topView.layer?.opacity ?? 0) > 0.5 ? topView : imageView
+        let inactive = (active === imageView) ? topView : imageView
+        active.isHidden = false
+        setContents(currentImage, on: active)
+        setOpacity(active, to: 1)
+        setOpacity(inactive, to: 0)
+        inactive.isHidden = true
+        inactive.image = nil
+        inactive.layer?.contents = nil
     }
 
     private func setContents(_ img: NSImage?, on v: ImageCanvas) {
@@ -478,6 +484,7 @@ final class WidgetWindow {
         let blank = (topView.layer?.opacity ?? 0) > 0.5 ? imageView : topView
         let shown = (blank === imageView) ? topView : imageView
 
+        blank.isHidden = false
         container.addSubview(blank, positioned: .below, relativeTo: shown)
         setContents(img, on: blank)
         blank.displayIfNeeded()          // vẽ ngay, không đợi vòng chạy kế
@@ -485,7 +492,9 @@ final class WidgetWindow {
         fade(shown, to: 0) { [weak shown] in
             // Sau khi mờ hẳn, giải phóng bitmap và backing store của lớp ảnh cũ
             // để chỉ giữ duy nhất 1 ảnh trong VRAM/RAM thay vì 2 giữa các chu kỳ.
+            // Đặt `isHidden = true` để AppKit không tự động tái cấp phát vùng nhớ backing store rỗng.
             guard let shown, (shown.layer?.opacity ?? 0) == 0 else { return }
+            shown.isHidden = true
             shown.image = nil
             shown.layer?.contents = nil
         }
@@ -724,8 +733,10 @@ private func layout() {
         currentURL = nil
         imageView.image = nil
         imageView.layer?.contents = nil
+        imageView.isHidden = true
         topView.image = nil
         topView.layer?.contents = nil
+        topView.isHidden = true
         overlay.hide()
         setControlsVisible(false)
         window.orderOut(nil)

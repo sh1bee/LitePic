@@ -33,6 +33,7 @@ Mỗi mục đều có **phép đo cụ thể đã chạy được**, không ph�
 | 24 | Ghim ảnh bị xung đột khi chuyển ảnh | unpin tự nhiên trong `step` |
 | 25 | Tối ưu ImageStore & biên (edge cases) | decode nền, autoLift, clear dọn |
 | 26 | Nâng cấp sâu hiệu năng tài nguyên | occlusion, utility QoS, layer buffer, grid, stat memo |
+| 27 | Ba tinh chỉnh biên sau nâng cấp | reload xoá ảnh, isHidden backing store, menu userInitiated |
 
 Mục 6, 9, 12, 19, 20 và 21 đều có **nhiều nguyên nhân chồng nhau** — sửa một chưa đủ.
 
@@ -763,6 +764,27 @@ fade(shown, to: 0)
 **5. Loại bỏ lời gọi `stat` đĩa trên Main Thread trong `ImageStore`**
 - *Hiện trạng:* `cacheKey(for:)` gọi `url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])` mỗi lần chuyển ảnh ngay trên luồng chính, gây ra các syscall `stat` đĩa lặp lại.
 - *Cách giải quyết:* Thêm bảng tra nhanh `keyMemo: [String: String]` trong RAM (được bảo vệ bởi `lock`), lưu sẵn cacheKey theo đường dẫn file. Khi `FolderWatcher` phát hiện thay đổi thư mục, `clearMemory()` dọn sạch `keyMemo` để đọc lại metadata. Luồng chính chuyển ảnh mượt mà mà không chạm đĩa.
+
+---
+
+## 27. Ba điểm tinh chỉnh biên sau nâng cấp hiệu năng sâu (đã thực hiện)
+
+**1. Tự dọn RAM và ẩn Widget khi xoá hết ảnh từ Finder (`reload()`)**
+- *Hiện trạng:* Trong `AppController.reload()`, khi người dùng xoá hoặc di chuyển toàn bộ ảnh khỏi thư mục trong Finder (hoặc rút ổ đĩa ngoài), `images.isEmpty` là true. Nhánh `if !images.isEmpty` bị bỏ qua mà không có `else`, khiến `widget.clear()` không được gọi và bức ảnh cuối cùng vẫn nằm lại trên màn hình.
+- *Cách giải quyết:* Thêm nhánh `else { ImageStore.clearMemory(); widget.clear() }` để dọn sạch RAM cache và ẩn cửa sổ ngay khi thư mục không còn ảnh nào.
+
+**2. Đồng bộ `refreshImageLayer()` và ngắt Backing Store bằng `isHidden`**
+- *Hiện trạng:*
+  - Trong `crossfade(to:)`, khi gán `shown.image = nil`, `didSet { needsDisplay = true }` của `ImageCanvas` kích hoạt lại `draw(_:)` ở chu kỳ RunLoop kế tiếp, khiến AppKit tự động cấp phát lại một `CABackingStore` rỗng trong suốt.
+  - Khi người dùng đổi cách điền ảnh (FillMode), `refreshImageLayer()` gán cố định lên `imageView` mà không kiểm tra xem `topView` có đang là lớp hiển thị hay không, làm lệch lớp và kích hoạt implicit animation.
+- *Cách giải quyết:*
+  - Trong `crossfade(to:)`: bật `blank.isHidden = false` trước khi vẽ và đặt `shown.isHidden = true` sau khi mờ xong, ngắt hoàn toàn backing store của lớp ẩn.
+  - Trong `refreshImageLayer()`: xác định lớp đang hiển thị `active` (`(topView.layer?.opacity ?? 0) > 0.5 ? topView : imageView`), cập nhật trực tiếp lên `active`, dùng `setOpacity` đồng bộ và dọn dẹp ẩn lớp `inactive`.
+
+**3. Đẩy QoS `.userInitiated` khi đổi kích thước / tỉ lệ / khung từ Menu**
+- *Hiện trạng:* Khi người dùng chọn menu để đổi kích thước (`applyAppearance`), chất lượng 1×/2× (`pickRenderScale`), hoặc khung ảnh (`pickFrame`), `widget.show` được gọi với mặc định `userInitiated = false`. Việc giải mã lại ảnh hiện tại bị đưa vào QoS `.utility` (chạy chậm trên E-cores) dù người dùng đang trực tiếp quan sát.
+- *Cách giải quyết:* Truyền `userInitiated: true` trong `applyAppearance()`, `pickRenderScale()`, và `pickFrame()` để giải mã ngay lập tức trên P-cores.
+
 
 
 

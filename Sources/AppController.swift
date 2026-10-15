@@ -335,6 +335,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             // chính, và nhớ lại trong RAM cho lần xem sau.
             ImageStore.clearMemory()
             advance()
+        } else {
+            ImageStore.clearMemory()
+            widget.clear()
         }
     }
 
@@ -515,7 +518,9 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func applyAppearance() {
         widget.applyAll()
         // Đổi cỡ từ menu là chủ động của người dùng nên áp dụng ngay kể cả khi bận.
-        if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+        if lastIndex >= 0 && lastIndex < images.count {
+            widget.show(images[lastIndex], evenIfBusy: true, userInitiated: true)
+        }
         pruneCache()
         rebuildMenu()
     }
@@ -586,13 +591,17 @@ final class AppController: NSObject, NSApplicationDelegate {
         settings.renderScale = CGFloat(sender.tag)
         pruneCache()
         rebuildMenu()
-        if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+        if lastIndex >= 0 && lastIndex < images.count {
+            widget.show(images[lastIndex], evenIfBusy: true, userInitiated: true)
+        }
     }
 
     @objc private func pickFrame(_ sender: NSMenuItem) {
         settings.frameStyle = FrameStyle(rawValue: sender.tag) ?? .shadow
         widget.applyAll()
-        if lastIndex >= 0 && lastIndex < images.count { widget.show(images[lastIndex], evenIfBusy: true) }
+        if lastIndex >= 0 && lastIndex < images.count {
+            widget.show(images[lastIndex], evenIfBusy: true, userInitiated: true)
+        }
         rebuildMenu()
     }
 

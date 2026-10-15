@@ -3,3 +3,13 @@ build/
 *.swp
 *~
 code-base*.txt
+
+# Test harness and benchmark (local only)
+Tests/
+test.sh
+bench/
+bench.sh
+
+# Developer notes and internal documentation (local only)
+BUGS.md
+CHAT.MD

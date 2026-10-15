@@ -71,6 +71,7 @@ enum ImageStore {
     // MARK: - Liệt kê
 
     /// Liệt kê file ảnh trong các thư mục đã chọn (hỗ trợ nhiều thư mục / nhiều "album").
+    /// Được sắp xếp theo thứ tự chữ cái tự nhiên (như Finder) thay vì thứ tự thô ngẫu nhiên của APFS.
     static func files(in folders: [URL]) -> [URL] {
         let fm = FileManager.default
         var out: [URL] = []
@@ -80,9 +81,10 @@ enum ImageStore {
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
             ) else { continue }
-            for u in items where supported.contains(u.pathExtension.lowercased()) {
-                out.append(u)
-            }
+            let matched = items
+                .filter { supported.contains($0.pathExtension.lowercased()) }
+                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            out.append(contentsOf: matched)
         }
         return out
     }

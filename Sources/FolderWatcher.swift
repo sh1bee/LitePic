@@ -47,7 +47,20 @@ final class FolderWatcher {
             guard let info else { return }
             let self_ = Unmanaged<FolderWatcher>.fromOpaque(info).takeUnretainedValue()
             let paths = rawPaths.bindMemory(to: CFString.self, capacity: count)
-            for i in 0..<count { Diag.log("FSEvent: \(paths[i])") }
+            var relevant = false
+            for i in 0..<count {
+                let p = paths[i] as String
+                Diag.log("FSEvent: \(p)")
+                let u = URL(fileURLWithPath: p)
+                let name = u.lastPathComponent
+                // Bỏ qua file ẩn (như .DS_Store, ._*) để việc mở Finder không làm kích hoạt reload
+                if name.hasPrefix(".") { continue }
+                let ext = u.pathExtension.lowercased()
+                if ext.isEmpty || ImageStore.supported.contains(ext) {
+                    relevant = true
+                }
+            }
+            guard relevant else { return }
             // PHẢI bắn về main queue. FSEvents gọi callback trên `queue` (luồng
             // phụ), còn `onChange` lại đụng vào `rescanPending`/`rescanScheduled`
             // của AppController — những biến đó main thread cũng đọc/ghi. Gọi

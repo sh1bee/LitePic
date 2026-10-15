@@ -40,6 +40,8 @@ final class WidgetControls: NSView {
         b.wantsLayer = true
         b.bezelStyle = .texturedRounded
         b.isBordered = false
+        b.imagePosition = .imageOnly
+        b.imageScaling = .scaleProportionallyDown
         b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         b.contentTintColor = .white
         b.target = self

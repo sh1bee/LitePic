@@ -8,6 +8,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var images: [URL] = []
     private var lastIndex: Int = -1
+    /// Lịch sử các ảnh đã xem gần đây (để nút ‹ lùi đúng về ảnh vừa chiếu)
+    private var history: [Int] = []
 
     /// Ảnh đang ghim — bộ đếm bỏ qua nó để không đổi vô ích.
     private var isPinned: Bool { settings.pinnedURL != nil }
@@ -133,6 +135,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: widget.window, queue: .main) { [weak self] _ in
                 guard let self else { return }
+                guard self.widget.window.isVisible else { return }
                 let visible = self.widget.window.occlusionState.contains(.visible)
                 if !visible {
                     if !self.isOccluded {
@@ -319,23 +322,39 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private func reload() {
         let folders = settings.folders
-        images = ImageStore.files(in: folders)
-        lastIndex = -1
+        let oldImages = images
+        let currentPath = images.indices.contains(lastIndex) ? images[lastIndex].path : nil
+        let newImages = ImageStore.files(in: folders)
+
         // Theo dõi đúng các thư mục đang dùng — vị trí có thể đổi sau khi
         // bookmark giải ra đường dẫn thật.
         watcher.watch(folders)
-        Diag.log("reload: \(images.count) anh tu \(folders.count) thu muc")
+        Diag.log("reload: \(newImages.count) anh tu \(folders.count) thu muc")
+
+        // Nếu danh sách file ảnh không đổi (ví dụ do file ẩn thay đổi), không giật ảnh và không xoá RAM
+        if newImages == oldImages {
+            rebuildMenu()
+            return
+        }
+
+        images = newImages
         rebuildMenu()
         scheduleTimer()
         pruneCache()
+
         if !images.isEmpty {
-            // KHÔNG giải mã hết loạt ảnh lúc mở. Bản cũ làm vậy và đo được:
-            // CPU +1.25s, RAM 24 MB -> 52 MB, trong khi phần lớn ảnh đó không
-            // bao giờ được xem. Ảnh giờ được giải mã khi thật sự cần, ngoài luồng
-            // chính, và nhớ lại trong RAM cho lần xem sau.
             ImageStore.clearMemory()
-            advance()
+            // Nếu ảnh đang xem vẫn còn trong danh sách mới, giữ nguyên vị trí ảnh đó
+            if let currentPath, let idx = images.firstIndex(where: { $0.path == currentPath }) {
+                lastIndex = idx
+            } else {
+                lastIndex = -1
+                advance()
+            }
         } else {
+            lastIndex = -1
+            history.removeAll()
+            isOccluded = false
             ImageStore.clearMemory()
             widget.clear()
         }
@@ -358,6 +377,8 @@ final class AppController: NSObject, NSApplicationDelegate {
         settings.folderPaths = []
         images = []
         lastIndex = -1
+        history.removeAll()
+        isOccluded = false
         watcher.stop()
         timer?.invalidate()
         timer = nil
@@ -423,6 +444,10 @@ final class AppController: NSObject, NSApplicationDelegate {
             idx = Int.random(in: 0..<images.count)
             if idx == lastIndex { idx = (idx + 1) % images.count }  // tránh lặp lại liên tiếp
         }
+        if lastIndex >= 0 && lastIndex < images.count {
+            history.append(lastIndex)
+            if history.count > 30 { history.removeFirst() }
+        }
         lastIndex = idx
         widget.show(images[idx])
     }
@@ -452,9 +477,25 @@ final class AppController: NSObject, NSApplicationDelegate {
             widget.setPinned(false)
         }
         let cur = images.indices.contains(lastIndex) ? lastIndex : 0
-        let next = ((cur + delta) % images.count + images.count) % images.count
+        let next: Int
+        if delta < 0 {
+            // Khi bấm nút Trước (‹), lùi về ảnh vừa xem trước đó trong lịch sử
+            if let prev = history.popLast(), prev < images.count {
+                next = prev
+            } else {
+                next = ((cur + delta) % images.count + images.count) % images.count
+            }
+        } else {
+            // Khi bấm nút Kế tiếp (›), lưu ảnh hiện tại vào lịch sử rồi tiến tới ảnh kế
+            if lastIndex >= 0 && lastIndex < images.count {
+                history.append(lastIndex)
+                if history.count > 30 { history.removeFirst() }
+            }
+            next = (cur + delta) % images.count
+        }
         lastIndex = next
         widget.show(images[next], userInitiated: true)
+        scheduleTimer()
         rebuildMenu()
     }
 

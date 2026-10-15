@@ -82,7 +82,7 @@ final class DraggableView: NSView {
         super.updateTrackingAreas()
         if let t = tracking { removeTrackingArea(t) }
         let area = NSTrackingArea(rect: bounds,
-                                  options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+                                  options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect, .assumeInside],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
         tracking = area
@@ -712,6 +712,7 @@ private func layout() {
         // Dán theo khung THẬT của ảnh, không tự tính lại từ kích thước ảnh:
         // vùng ảnh đã lệch trong container bởi viền trong suốt + khung.
         controls.place(atTopRightOf: imageView.frame)
+        container.addSubview(controls, positioned: .above, relativeTo: nil)
     }
 
     /// Hiện / ẩn nút điều khiển.

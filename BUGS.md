@@ -34,6 +34,7 @@ Mỗi mục đều có **phép đo cụ thể đã chạy được**, không ph�
 | 25 | Tối ưu ImageStore & biên (edge cases) | decode nền, autoLift, clear dọn |
 | 26 | Nâng cấp sâu hiệu năng tài nguyên | occlusion, utility QoS, layer buffer, grid, stat memo |
 | 27 | Ba tinh chỉnh biên sau nâng cấp | reload xoá ảnh, isHidden backing store, menu userInitiated |
+| 28 | Ba lỗi hành vi & trải nghiệm UX | FSEvents .DS_Store, history nút ‹, isOccluded |
 
 Mục 6, 9, 12, 19, 20 và 21 đều có **nhiều nguyên nhân chồng nhau** — sửa một chưa đủ.
 
@@ -784,6 +785,29 @@ fade(shown, to: 0)
 **3. Đẩy QoS `.userInitiated` khi đổi kích thước / tỉ lệ / khung từ Menu**
 - *Hiện trạng:* Khi người dùng chọn menu để đổi kích thước (`applyAppearance`), chất lượng 1×/2× (`pickRenderScale`), hoặc khung ảnh (`pickFrame`), `widget.show` được gọi với mặc định `userInitiated = false`. Việc giải mã lại ảnh hiện tại bị đưa vào QoS `.utility` (chạy chậm trên E-cores) dù người dùng đang trực tiếp quan sát.
 - *Cách giải quyết:* Truyền `userInitiated: true` trong `applyAppearance()`, `pickRenderScale()`, và `pickFrame()` để giải mã ngay lập tức trên P-cores.
+
+---
+
+## 28. Ba lỗi hành vi & trải nghiệm người dùng (UX Bugs) (đã sửa)
+
+**1. Mở thư mục ảnh trong Finder làm Widget tự ý giật đổi ảnh**
+- *Hiện trạng:* Khi mở thư mục ảnh trong Finder, macOS cập nhật file ẩn `.DS_Store`. `FolderWatcher` nhận sự kiện FSEvent kích hoạt `reload()`. Hàm này trước đây luôn đặt `lastIndex = -1`, xoá sạch cache RAM và gọi `advance()` giật ảnh khác dù danh sách ảnh thực tế không hề đổi.
+- *Cách giải quyết:* Lọc bỏ file ẩn (bắt đầu bằng dấu chấm `.`) và các file không phải định dạng ảnh được hỗ trợ trong callback của `FolderWatcher`. Trong `AppController.reload()`, so sánh danh sách ảnh mới với ảnh cũ: nếu danh sách không đổi (`newImages == oldImages`), giữ nguyên ảnh đang chiếu và không xoá RAM. Nếu danh sách thay đổi, giữ lại ảnh hiện tại nếu nó vẫn còn trong thư mục.
+
+**2. Bấm nút Trước (‹) không quay lại ảnh vừa xem & Timer cắt ngang lúc đang xem**
+- *Hiện trạng:*
+  - `advance()` nhảy ảnh ngẫu nhiên, nhưng `step(-1)` lại lùi theo chỉ mục mảng thay vì quay lại bức ảnh vừa xem.
+  - `step(_:)` không gọi `scheduleTimer()` khiến timer nổ cắt ngang khi người dùng vừa bấm đổi ảnh.
+  - `ImageStore.files(in:)` trả về thứ tự ngẫu nhiên của APFS thay vì bảng chữ cái.
+- *Cách giải quyết:*
+  - Sắp xếp mảng ảnh trong `ImageStore.files(in:)` bằng `.localizedStandardCompare`.
+  - Duy trì ngăn xếp lịch sử `history: [Int]` (tối đa 30 ảnh). Nút ‹ sẽ pop ảnh vừa xem gần nhất trong lịch sử để lùi chính xác; nút › đẩy ảnh hiện tại vào lịch sử.
+  - Gọi `scheduleTimer()` ở cuối `step(_:)` để người dùng có trọn vẹn một chu kỳ ngắm ảnh.
+
+**3. Cờ `isOccluded` bị kẹt `true` khi cửa sổ ẩn (`orderOut`)**
+- *Hiện trạng:* Khi `widget.clear()` gọi `window.orderOut(nil)` hoặc khi app mới khởi tạo chưa có ảnh, AppKit gửi thông báo `didChangeOcclusionStateNotification` với `visible = false`, khiến `isOccluded` bị gán thành `true` và chặn timer.
+- *Cách giải quyết:* Thêm `guard self.widget.window.isVisible else { return }` vào đầu observer, đồng thời chủ động reset `isOccluded = false` trong `clearFolders()` và nhánh thư mục rỗng của `reload()`.
+
 
 
 

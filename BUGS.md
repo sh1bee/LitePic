@@ -32,6 +32,7 @@ Mỗi mục đều có **phép đo cụ thể đã chạy được**, không ph�
 | 23 | Khung Polaroid cụt viền đáy | thiếu `frameBottom` |
 | 24 | Ghim ảnh bị xung đột khi chuyển ảnh | unpin tự nhiên trong `step` |
 | 25 | Tối ưu ImageStore & biên (edge cases) | decode nền, autoLift, clear dọn |
+| 26 | Nâng cấp sâu hiệu năng tài nguyên | occlusion, utility QoS, layer buffer, grid, stat memo |
 
 Mục 6, 9, 12, 19, 20 và 21 đều có **nhiều nguyên nhân chồng nhau** — sửa một chưa đủ.
 
@@ -738,5 +739,30 @@ fade(shown, to: 0)
 4. **Chống đua nạp ảnh bất đồng bộ (Out-of-order load)**: Tăng `showToken += 1` ngay đầu `show()` và trong `clear()` để lập tức vô hiệu hoá mọi lượt tải nền cũ. Truyền cờ `evenIfBusy` vào callback của `ImageStore.load()`.
 5. **Đồng bộ thời điểm `autoLiftIfOccluded()`**: Chỉ kiểm tra nâng tầng khi cửa sổ đã thực sự xuất hiện lên màn hình lần đầu (`if !settled` trong `applyImage()`), truy vấn hệ thống qua `CGWindowListCopyWindowInfo` và lọc bỏ các cửa sổ có `kCGWindowLayer != 0`.
 6. **Dọn dẹp triệt để trong `clearFolders()`**: Gọi `watcher.stop()`, đặt `lastIndex = -1` và gán `currentURL = nil` trong `widget.clear()`.
+
+---
+
+## 26. 5 điểm nâng cấp sâu về quản lý tài nguyên cấp thấp (đã thực hiện)
+
+**1. Tạm dừng đổi ảnh khi widget bị che khuất 100% (`NSWindow.occlusionState`)**
+- *Hiện trạng:* Khi người dùng mở app toàn màn hình (Full Screen Space) hoặc widget ở chế độ `.desktop` bị che kín, `window.isVisible` vẫn là true và timer vẫn đánh thức CPU/GPU giải mã ảnh và chạy animation crossfade 60fps vô ích.
+- *Cách giải quyết:* Lắng nghe `NSWindow.didChangeOcclusionStateNotification` trên `widget.window`. Khi `!window.occlusionState.contains(.visible)`: huỷ timer và đặt `isOccluded = true`. Khi cửa sổ lộ ra trở lại: khôi phục `scheduleTimer()`. Tiết kiệm 100% CPU/GPU khi widget không nhìn thấy.
+
+**2. Đưa `decodeQueue` sang QoS `.utility` cho timer tự động (E-cores trên Apple Silicon)**
+- *Hiện trạng:* `decodeQueue` cố định `qos: .userInitiated`, khiến bộ lập lịch XNU đánh thức cụm nhân hiệu năng cao (P-cores) và đẩy xung nhịp cao trong các lần đổi ảnh tự động nền.
+- *Cách giải quyết:* Khởi tạo `decodeQueue` với mặc định `qos: .utility` để XNU điều phối việc giải mã JPEG ngầm hoàn toàn sang các nhân tiết kiệm điện (E-cores, tiêu thụ ~1/4 điện năng). Khi người dùng thao tác trực tiếp (bấm nút ‹ / ›, thả file), cờ `userInitiated: true` nâng block thực thi lên `qos: .userInitiated`.
+
+**3. Giải phóng bộ đệm của lớp ảnh ẩn sau khi crossfade kết thúc (~2–4 MB RAM/VRAM)**
+- *Hiện trạng:* Sau animation `fade(shown, to: 0)` 0.30s, `shown.image` và `CALayer.contents` vẫn giữ lại bitmap ảnh cũ cho tới tận chu kỳ đổi ảnh kế tiếp, làm app luôn giữ đồng thời 2 bitmap lớn trong bộ nhớ đồ hoạ.
+- *Cách giải quyết:* Thêm completion block vào `fade()`: khi `opacity == 0` sau animation, giải phóng ngay `shown.image = nil` và `shown.layer?.contents = nil`. Widget chỉ giữ đúng 1 bitmap duy nhất trên GPU giữa các chu kỳ đổi ảnh.
+
+**4. Tối giản `GridOverlay` xuống 1 NSView/CALayer duy nhất khi `drawAllSlots = false`**
+- *Hiện trạng:* Dù `drawAllSlots = false` (chỉ hiện ô đang ngắm), `show()` vẫn tạo 50–240 `NSView` với `wantsLayer = true` rồi ẩn đi, và khi `hide()` chỉ gọi `orderOut` mà không dọn view.
+- *Cách giải quyết:* Khi `!Self.drawAllSlots`, chỉ tạo duy nhất 1 `highlightView` (1 CALayer); khi `highlight(index:)` chỉ cập nhật frame của view này tới toạ độ `slots[index]`. Khi `hide()`, xoá sạch view khỏi `host` (`removeFromSuperview()`) và giải phóng mảng toạ độ.
+
+**5. Loại bỏ lời gọi `stat` đĩa trên Main Thread trong `ImageStore`**
+- *Hiện trạng:* `cacheKey(for:)` gọi `url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])` mỗi lần chuyển ảnh ngay trên luồng chính, gây ra các syscall `stat` đĩa lặp lại.
+- *Cách giải quyết:* Thêm bảng tra nhanh `keyMemo: [String: String]` trong RAM (được bảo vệ bởi `lock`), lưu sẵn cacheKey theo đường dẫn file. Khi `FolderWatcher` phát hiện thay đổi thư mục, `clearMemory()` dọn sạch `keyMemo` để đọc lại metadata. Luồng chính chuyển ảnh mượt mà mà không chạm đĩa.
+
 
 

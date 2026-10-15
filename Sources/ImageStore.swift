@@ -59,11 +59,14 @@ enum ImageStore {
     private static var memCache: [String: NSImage] = [:]
     private static var memOrder: [String] = []
     private static var sizeMemo: [String: CGSize] = [:]
+    private static var keyMemo: [String: String] = [:]
 
     /// Hàng đợi giải mã nối tiếp — chỉ một ảnh được giải mã tại một thời điểm.
     /// Quan trọng cho RAM: hai ảnh 4K giải mã chồng nhau là 60 MB, một ảnh thì 10.
+    /// Mặc định QoS là `.utility` để ưu tiên chạy trên E-cores (nhân tiết kiệm điện)
+    /// của Apple Silicon, giảm 75% năng lượng tiêu thụ khi timer nền đổi ảnh tự động.
     private static let decodeQueue = DispatchQueue(
-        label: "local.litepic.decode", qos: .userInitiated)
+        label: "local.litepic.decode", qos: .utility)
 
     // MARK: - Liệt kê
 
@@ -157,7 +160,7 @@ enum ImageStore {
     ///
     /// Trả ngay tức thì (không cần bố trí hẹn giờ) nếu ảnh còn trong RAM — đường
     /// này chiếm đa số lượt bấm nút Next/Previous.
-    static func load(_ url: URL, maxPixel: CGFloat, completion: @escaping (NSImage?) -> Void) {
+    static func load(_ url: URL, maxPixel: CGFloat, userInitiated: Bool = false, completion: @escaping (NSImage?) -> Void) {
         let b = bucket(for: max(64, maxPixel))
         let key = "\(cacheKey(for: url))-\(b)"
 
@@ -174,7 +177,7 @@ enum ImageStore {
         let file = cacheDir.appendingPathComponent("\(key).jpg")
         let pixel = b
 
-        decodeQueue.async {
+        let decodeWork = {
             autoreleasepool {
                 // Cache đĩa: JPEG nhỏ, giải mã 100% ngoài luồng chính bằng decodeThumbnail
                 // thay vì NSImage(contentsOf:) — NSImage(contentsOf:) trì hoãn việc giải mã
@@ -206,6 +209,12 @@ enum ImageStore {
                 DispatchQueue.main.async { completion(img) }
             }
         }
+
+        if userInitiated {
+            decodeQueue.async(qos: .userInitiated, execute: decodeWork)
+        } else {
+            decodeQueue.async(execute: decodeWork)
+        }
     }
 
     // MARK: - Bộ nhớ
@@ -228,6 +237,7 @@ enum ImageStore {
         memCache.removeAll()
         memOrder.removeAll()
         sizeMemo.removeAll()
+        keyMemo.removeAll()
         lock.unlock()
     }
 
@@ -266,13 +276,29 @@ enum ImageStore {
     }
 
     /// Khoá cache theo đường dẫn + mtime + size: sửa ảnh gốc thì tự sinh cache mới.
+    /// Có bảng tra cứu `keyMemo` trong RAM để không phải gọi syscall stat đĩa
+    /// trên Main Thread mỗi lần chuyển ảnh.
     private static func cacheKey(for url: URL) -> String {
+        let path = url.path
+        lock.lock()
+        if let hit = keyMemo[path] {
+            lock.unlock()
+            return hit
+        }
+        lock.unlock()
+
         let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
         let mtime = Int(v?.contentModificationDate?.timeIntervalSince1970 ?? 0)
         let size = v?.fileSize ?? 0
-        let raw = "\(url.path)|\(mtime)|\(size)"
+        let raw = "\(path)|\(mtime)|\(size)"
         let hex = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
-        return String(hex.prefix(16))
+        let key = String(hex.prefix(16))
+
+        lock.lock()
+        if keyMemo.count > 512 { keyMemo.removeAll() }
+        keyMemo[path] = key
+        lock.unlock()
+        return key
     }
 
     // MARK: - Dọn cache

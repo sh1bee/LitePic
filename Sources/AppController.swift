@@ -13,6 +13,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var isPinned: Bool { settings.pinnedURL != nil }
     private var paused = false
     private var screenAsleep = false
+    private var isOccluded = false
     /// Đang có một lần thử đổi ảnh hoãn vì người dùng đang kéo widget.
     private var retryScheduled = false
     private var rescanPending = false
@@ -124,6 +125,26 @@ final class AppController: NSObject, NSApplicationDelegate {
             if settings.changeOnWake { self.advance() }
             self.scheduleTimer()
         })
+
+        // Tạm dừng đổi ảnh khi widget bị che khuất 100% (cửa sổ app khác che kín
+        // hoặc người dùng sang Không gian/Space toàn màn hình khác). Tránh lãng phí
+        // chu kỳ giải mã ảnh và animation 60fps khi không ai nhìn thấy.
+        observerTokens.append(NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: widget.window, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                let visible = self.widget.window.occlusionState.contains(.visible)
+                if !visible {
+                    if !self.isOccluded {
+                        self.isOccluded = true
+                        self.timer?.invalidate()
+                        self.timer = nil
+                    }
+                } else if self.isOccluded {
+                    self.isOccluded = false
+                    self.scheduleTimer()
+                }
+            })
     }
 
     deinit {
@@ -350,7 +371,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func scheduleTimer() {
         timer?.invalidate()
         timer = nil
-        guard !paused, !screenAsleep, images.count > 1 else { return }
+        guard !paused, !screenAsleep, !isOccluded, images.count > 1 else { return }
 
         let interval: TimeInterval
         if settings.randomInterval {
@@ -430,7 +451,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         let cur = images.indices.contains(lastIndex) ? lastIndex : 0
         let next = ((cur + delta) % images.count + images.count) % images.count
         lastIndex = next
-        widget.show(images[next])
+        widget.show(images[next], userInitiated: true)
         rebuildMenu()
     }
 
@@ -474,7 +495,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
         if let i = images.firstIndex(where: { $0.path == pick.path }) {
             lastIndex = i
-            widget.show(images[i], evenIfBusy: true)
+            widget.show(images[i], evenIfBusy: true, userInitiated: true)
             settings.pinnedURL = images[i].path
             widget.setPinned(true)
         }

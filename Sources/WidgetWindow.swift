@@ -127,6 +127,10 @@ final class GridOverlay {
     private let window: NSWindow
     private let host = NSView()
     private var slotViews: [NSView] = []
+    private var singleHighlightView: NSView?
+    private var cachedSlots: [NSPoint] = []
+    private var cachedScreenOrigin: NSPoint = .zero
+    private var cachedSize: NSSize = .zero
     /// Ô đang sáng — để lần tới chỉ vẽ lại đúng ô vừa bỏ sáng và ô vừa sáng.
     private var highlighted: Int?
 
@@ -149,51 +153,68 @@ final class GridOverlay {
     func setLevel(_ base: NSWindow.Level) { window.level = base + 1 }
 
     func show(slots: [NSPoint], size: NSSize, corner: CGFloat, on screen: NSScreen) {
-        for v in host.subviews { v.removeFromSuperview() }
+        hide()
         highlighted = nil
-        slotViews = slots.map { origin in
-            let v = NSView(frame: NSRect(x: origin.x - screen.frame.minX,
-                                         y: origin.y - screen.frame.minY,
-                                         width: size.width, height: size.height))
+        cachedSlots = slots
+        cachedScreenOrigin = screen.frame.origin
+        cachedSize = size
+
+        if Self.drawAllSlots {
+            slotViews = slots.map { origin in
+                let v = NSView(frame: NSRect(x: origin.x - screen.frame.minX,
+                                             y: origin.y - screen.frame.minY,
+                                             width: size.width, height: size.height))
+                v.wantsLayer = true
+                v.layer?.cornerRadius = corner
+                v.layer?.cornerCurve = .continuous
+                v.layer?.borderWidth = 1.5
+                v.layer?.borderColor = NSColor.white.withAlphaComponent(0.5).cgColor
+                v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+                host.addSubview(v)
+                return v
+            }
+        } else {
+            // Khi chỉ vẽ ô đang ngắm, chỉ tạo đúng DUY NHẤT 1 NSView / CALayer.
+            // Tránh tạo hàng chục đến hàng trăm CALayers không dùng trong WindowServer.
+            let v = NSView(frame: .zero)
             v.wantsLayer = true
             v.layer?.cornerRadius = corner
             v.layer?.cornerCurve = .continuous
-            v.layer?.borderWidth = 1.5
-            v.layer?.borderColor = NSColor.white.withAlphaComponent(0.5).cgColor
-            v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
-            // Tắt vẽ thì ô không hiện, nhưng vẫn giữ trong `slotViews` để
-            // `highlight()` tô sáng ô đang ngắm hoạt động như cũ.
-            v.isHidden = !Self.drawAllSlots
+            v.isHidden = true
             host.addSubview(v)
-            return v
+            singleHighlightView = v
         }
         window.setFrame(screen.frame, display: true)
         window.orderFrontRegardless()
-        // `display: true` trên đã đủ, nhưng `orderFrontRegardless` không bảo đảm
-        // vẽ lại khi cửa sổ đã hiện sẵn từ trước. Gọi display rõ ràng để chắc.
         window.displayIfNeeded()
     }
 
     /// Tô sáng ô đang ngắm.
-    ///
-    /// Chỉ chạm vào tối đa 2 lớp thay vì cả 8. Bản cũ lặp qua toàn bộ ô và đặt
-    /// lại `borderWidth`/`borderColor`/`backgroundColor` cho từng ô — mỗi lần
-    /// đặt là một lần lớp phải vẽ lại. Hàm này được gọi theo MỌI sự kiện rê
-    /// chuột trong lúc kéo chế độ lưới, tức hàng trăm lần mỗi lần kéo.
     func highlight(index: Int?) {
-        if let was = highlighted, was != index {
-            paint(slotViews[was], on: false)
-        }
-        if let now = index, slotViews.indices.contains(now) {
-            paint(slotViews[now], on: true)
+        if Self.drawAllSlots {
+            if let was = highlighted, was != index {
+                paint(slotViews[was], on: false)
+            }
+            if let now = index, slotViews.indices.contains(now) {
+                paint(slotViews[now], on: true)
+            }
+        } else if let v = singleHighlightView {
+            if let now = index, cachedSlots.indices.contains(now) {
+                let origin = cachedSlots[now]
+                v.frame = NSRect(x: origin.x - cachedScreenOrigin.x,
+                                 y: origin.y - cachedScreenOrigin.y,
+                                 width: cachedSize.width, height: cachedSize.height)
+                paint(v, on: true)
+                v.isHidden = false
+            } else {
+                v.isHidden = true
+            }
         }
         highlighted = index
     }
 
     private func paint(_ v: NSView, on: Bool) {
         guard let l = v.layer else { return }
-        // Khi tắt vẽ toàn bộ ô thì ô đang ngắm vẫn phải hiện — nếu không,
-        // người dùng không thấy chỗ nó sẽ rơi vào, và lưới thành vô dụng.
         v.isHidden = !on && !Self.drawAllSlots
         l.borderWidth = on ? 2.5 : 1.5
         l.borderColor = on
@@ -207,6 +228,11 @@ final class GridOverlay {
     func hide() {
         highlighted = nil
         window.orderOut(nil)
+        slotViews.forEach { $0.removeFromSuperview() }
+        slotViews.removeAll()
+        singleHighlightView?.removeFromSuperview()
+        singleHighlightView = nil
+        cachedSlots.removeAll()
     }
 }
 
@@ -456,7 +482,13 @@ final class WidgetWindow {
         setContents(img, on: blank)
         blank.displayIfNeeded()          // vẽ ngay, không đợi vòng chạy kế
         setOpacity(blank, to: 1)         // tức thì — giữ dưới lớp cũ nên không nhảy
-        fade(shown, to: 0)               // chỉ lớp này chuyển động
+        fade(shown, to: 0) { [weak shown] in
+            // Sau khi mờ hẳn, giải phóng bitmap và backing store của lớp ảnh cũ
+            // để chỉ giữ duy nhất 1 ảnh trong VRAM/RAM thay vì 2 giữa các chu kỳ.
+            guard let shown, (shown.layer?.opacity ?? 0) == 0 else { return }
+            shown.image = nil
+            shown.layer?.contents = nil
+        }
     }
 
     /// Đặt opacity tức thì, không animate — ngược lại với `fade`.
@@ -476,14 +508,21 @@ final class WidgetWindow {
     /// `NSAnimationContext`, nên thời lượng và easing không kiểm soát được.
     /// Rõ hơn nữa, phải trộn `view.alphaValue` và `layer.opacity` là hỏng —
     /// hai thứ nhân với nhau.
-    private func fade(_ view: ImageCanvas, to value: Float) {
+    private func fade(_ view: ImageCanvas, to value: Float, completion: (() -> Void)? = nil) {
         guard let l = view.layer else { return }
         l.removeAnimation(forKey: "fade")
         // Lấy giá trị đang hiển thị trên màn hình, không phải giá trị model —
         /// nếu không, lần fade thứ hai sẽ nhảy về 0 rồi mới mờ lên.
         let from = l.presentation()?.opacity ?? l.opacity
-        if abs(from - value) < 0.001 { return }
+        if abs(from - value) < 0.001 {
+            completion?()
+            return
+        }
 
+        CATransaction.begin()
+        if let completion {
+            CATransaction.setCompletionBlock(completion)
+        }
         let a = CABasicAnimation(keyPath: "opacity")
         a.fromValue = from
         a.toValue = value
@@ -492,7 +531,6 @@ final class WidgetWindow {
         l.add(a, forKey: "fade")
 
         // Giá trị model phải khớp ngay, nếu không animation chỉ chạy một lần.
-        CATransaction.begin()
         CATransaction.setDisableActions(true)
         l.opacity = value
         CATransaction.commit()
@@ -685,7 +723,9 @@ private func layout() {
         currentImage = nil
         currentURL = nil
         imageView.image = nil
+        imageView.layer?.contents = nil
         topView.image = nil
+        topView.layer?.contents = nil
         overlay.hide()
         setControlsVisible(false)
         window.orderOut(nil)
@@ -716,7 +756,7 @@ private func layout() {
 
     // MARK: - Hiển thị
 
-    func show(_ url: URL, evenIfBusy: Bool = false) {
+    func show(_ url: URL, evenIfBusy: Bool = false, userInitiated: Bool = false) {
         // Đang kéo mà đổi ảnh thì cửa sổ đổi kích thước và giật khỏi tay
         // người dùng — hoãn lại (AppController sẽ thử lại sau vài giây).
         guard evenIfBusy || !busy else { return }
@@ -755,7 +795,7 @@ private func layout() {
         // 0.33s để giải mã — nghĩa là widget đứng hình gần nửa giây. Giờ luồng
         // chính giữ nguyên và ảnh về sau, không về trước.
         let pixel = displayMaxPixel
-        ImageStore.load(url, maxPixel: pixel) { [weak self] img in
+        ImageStore.load(url, maxPixel: pixel, userInitiated: userInitiated) { [weak self] img in
             guard let self, let img, self.showToken == token, (evenIfBusy || !self.busy) else { return }
             self.applyImage(img, url: url, size: target)
         }

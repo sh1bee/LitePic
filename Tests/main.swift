@@ -521,6 +521,87 @@ do {
 }
 
 // ============================================================
+print("L) Man hinh chao khi chua co anh (Empty State)")
+// ============================================================
+do {
+    let w = WidgetWindow()
+    var clicked = false
+    w.showEmpty { clicked = true }
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    line(w.window.isVisible, "empty state lam cua so hien")
+    line(w.isEmptyState, "co isEmptyState la true")
+    line(!w.emptyView.isHidden, "emptyView dang hien")
+    line(w.imageView.isHidden, "imageView dang an")
+    line(w.topView.isHidden, "topView dang an")
+
+    // Test click on empty state triggers callback
+    let center = NSPoint(x: w.window.frame.midX, y: w.window.frame.midY)
+    let view = w.container
+    after(0.1) { post(ev(.leftMouseUp, center, w.window)) }
+    view.mouseDown(with: ev(.leftMouseDown, center, w.window))
+    line(clicked, "click vao empty state goi callback chon thu muc")
+    w.clear()
+    line(!w.window.isVisible, "clear sau empty state dong cua so")
+    w.window.close()
+}
+
+// ============================================================
+print("M) Quet thu muc con va loai tru anh (Subfolders & Exclude)")
+// ============================================================
+do {
+    let base = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("litepic-subfolder-test", isDirectory: true)
+    let sub = base.appendingPathComponent("sub1", isDirectory: true)
+    try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+
+    let f1 = base.appendingPathComponent("img1.jpg")
+    let f2 = sub.appendingPathComponent("img2.png")
+    let f3 = sub.appendingPathComponent("notes.txt")
+    try? Data("test".utf8).write(to: f1)
+    try? Data("test".utf8).write(to: f2)
+    try? Data("test".utf8).write(to: f3)
+
+    let topOnly = ImageStore.files(in: [base], includeSubfolders: false)
+    line(topOnly.count == 1 && topOnly.first?.lastPathComponent == "img1.jpg",
+         "includeSubfolders = false chi lay anh o thu muc goc")
+
+    let recursive = ImageStore.files(in: [base], includeSubfolders: true)
+    line(recursive.count == 2,
+         "includeSubfolders = true lay ca anh o thu muc con (2 anh)")
+
+    let excluded = ImageStore.files(in: [base], includeSubfolders: true, excludedPaths: [f1.path])
+    line(excluded.count == 1 && excluded.first?.lastPathComponent == "img2.png",
+         "excludedPaths loai bo dung anh can bo qua")
+
+    try? FileManager.default.removeItem(at: base)
+}
+
+// ============================================================
+print("N) Vuot Trackpad 2 ngon hoac lan chuot (Swipe / Scroll)")
+// ============================================================
+do {
+    let (w, view) = makeWidget()
+    var swipedNext = false
+    var swipedPrev = false
+    view.onSwipeNext = { swipedNext = true }
+    view.onSwipePrev = { swipedPrev = true }
+
+    if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: -25, wheel3: 0),
+       let ev = NSEvent(cgEvent: cg) {
+        view.scrollWheel(with: ev)
+    }
+    line(swipedNext, "scrollWheel sang trai goi onSwipeNext")
+
+    Thread.sleep(forTimeInterval: 0.3)
+    if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: 25, wheel3: 0),
+       let ev = NSEvent(cgEvent: cg) {
+        view.scrollWheel(with: ev)
+    }
+    line(swipedPrev, "scrollWheel sang phai goi onSwipePrev")
+    w.window.close()
+}
+
+// ============================================================
 print("")
 if let saved = savedLevelMode {
     UserDefaults.standard.set(saved, forKey: "levelMode")

@@ -228,6 +228,8 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         add(m, "Đổi ảnh khi thức dậy", #selector(toggleChangeOnWake),
             state: settings.changeOnWake ? .on : .off)
+        add(m, "Bao gồm thư mục con", #selector(toggleIncludeSubfolders),
+            state: settings.includeSubfolders ? .on : .off)
         m.addItem(.separator())
 
         let hint = NSMenuItem(title: "Kéo xong là tự khe vào lưới", action: nil, keyEquivalent: "")
@@ -239,7 +241,14 @@ final class AppController: NSObject, NSApplicationDelegate {
             #selector(togglePause), state: paused ? .on : .off)
 
         m.addItem(.separator())
-        add(m, "Mở ảnh trong Finder", #selector(revealCurrent))
+        if widget.currentURL != nil {
+            add(m, "Mở ảnh trong Finder", #selector(revealCurrent))
+            add(m, "Sao chép ảnh", #selector(copyCurrentImage))
+            add(m, "Bỏ qua ảnh này", #selector(excludeCurrentPhoto))
+        }
+        if !settings.excludedPaths.isEmpty {
+            add(m, "Khôi phục \(settings.excludedPaths.count) ảnh đã bỏ qua", #selector(resetExcludedPhotos))
+        }
         add(m, "Xoá cache ảnh", #selector(clearImageCache))
         m.addItem(.separator())
         add(m, "Tự chạy khi đăng nhập", #selector(toggleLaunchAtLogin),
@@ -324,7 +333,9 @@ final class AppController: NSObject, NSApplicationDelegate {
         let folders = settings.folders
         let oldImages = images
         let currentPath = images.indices.contains(lastIndex) ? images[lastIndex].path : nil
-        let newImages = ImageStore.files(in: folders)
+        let newImages = ImageStore.files(in: folders,
+                                         includeSubfolders: settings.includeSubfolders,
+                                         excludedPaths: settings.excludedPaths)
 
         // Theo dõi đúng các thư mục đang dùng — vị trí có thể đổi sau khi
         // bookmark giải ra đường dẫn thật.
@@ -356,7 +367,9 @@ final class AppController: NSObject, NSApplicationDelegate {
             history.removeAll()
             isOccluded = false
             ImageStore.clearMemory()
-            widget.clear()
+            widget.showEmpty { [weak self] in
+                self?.chooseFolders()
+            }
         }
     }
 
@@ -382,11 +395,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         watcher.stop()
         timer?.invalidate()
         timer = nil
-        // PHẢI dọn widget. Trước đây hàm này chỉ dọn phía "dữ liệu", nên tấm ảnh
-        // cuối cùng vẫn nằm trên màn hình mãi mãi: danh sách rỗng thì không còn
-        // gì ra lệnh đổi ảnh, mà bộ đếm giờ đã bị tắt. Người dùng bấm "Bỏ thư mục"
-        // xong nhìn thấy ảnh vẫn còn, dễ tưởng nút hỏng.
-        widget.clear()
+        // Dọn dữ liệu và hiện màn hình chờ để người dùng chọn thư mục mới
+        widget.showEmpty { [weak self] in
+            self?.chooseFolders()
+        }
         rebuildMenu()
     }
 
@@ -537,6 +549,11 @@ final class AppController: NSObject, NSApplicationDelegate {
             if changed { widget.settleNow() }
             return
         }
+        if !settings.excludedPaths.isEmpty && settings.excludedPaths.contains(pick.path) {
+            var excluded = settings.excludedPaths
+            excluded.remove(pick.path)
+            settings.excludedPaths = excluded
+        }
         if let i = images.firstIndex(where: { $0.path == pick.path }) {
             lastIndex = i
             widget.show(images[i], evenIfBusy: true, userInitiated: true)
@@ -620,6 +637,48 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func revealCurrent(_ sender: Any?) {
         widget.revealCurrentInFinder()
+    }
+
+    @objc private func copyCurrentImage() {
+        guard let url = widget.currentURL else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        var items: [NSPasteboardWriting] = [url as NSURL]
+        if let img = widget.currentImageRef ?? NSImage(contentsOf: url) {
+            items.append(img)
+        }
+        pb.writeObjects(items)
+    }
+
+    @objc private func excludeCurrentPhoto() {
+        guard let path = widget.currentURL?.path else { return }
+        var excluded = settings.excludedPaths
+        excluded.insert(path)
+        settings.excludedPaths = excluded
+
+        images.removeAll { $0.path == path }
+        history.removeAll { images.indices.contains($0) && images[$0].path == path }
+        if isPinned && settings.pinnedURL == path {
+            settings.pinnedURL = nil
+            widget.setPinned(false)
+        }
+        if images.isEmpty {
+            lastIndex = -1
+            widget.showEmpty { [weak self] in self?.chooseFolders() }
+        } else {
+            advance()
+        }
+        rebuildMenu()
+    }
+
+    @objc private func resetExcludedPhotos() {
+        settings.excludedPaths = []
+        reload()
+    }
+
+    @objc private func toggleIncludeSubfolders() {
+        settings.includeSubfolders.toggle()
+        reload()
     }
 
     @objc private func pickOpacity(_ sender: NSMenuItem) {

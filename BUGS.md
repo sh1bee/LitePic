@@ -35,6 +35,7 @@ Mỗi mục đều có **phép đo cụ thể đã chạy được**, không ph�
 | 26 | Nâng cấp sâu hiệu năng tài nguyên | occlusion, utility QoS, layer buffer, grid, stat memo |
 | 27 | Ba tinh chỉnh biên sau nâng cấp | reload xoá ảnh, isHidden backing store, menu userInitiated |
 | 28 | Ba lỗi hành vi & trải nghiệm UX | FSEvents .DS_Store, history nút ‹, isOccluded |
+| 29 | 5 Tính năng nâng cấp tương tác & hiển thị | Empty State, Trackpad Swipe, Aspect Transition, Context Menu, Subfolders |
 
 Mục 6, 9, 12, 19, 20 và 21 đều có **nhiều nguyên nhân chồng nhau** — sửa một chưa đủ.
 
@@ -807,6 +808,33 @@ fade(shown, to: 0)
 **3. Cờ `isOccluded` bị kẹt `true` khi cửa sổ ẩn (`orderOut`)**
 - *Hiện trạng:* Khi `widget.clear()` gọi `window.orderOut(nil)` hoặc khi app mới khởi tạo chưa có ảnh, AppKit gửi thông báo `didChangeOcclusionStateNotification` với `visible = false`, khiến `isOccluded` bị gán thành `true` và chặn timer.
 - *Cách giải quyết:* Thêm `guard self.widget.window.isVisible else { return }` vào đầu observer, đồng thời chủ động reset `isOccluded = false` trong `clearFolders()` và nhánh thư mục rỗng của `reload()`.
+
+---
+
+## 29. 5 Tính năng nâng cấp tương tác & hiển thị (đã triển khai)
+
+**1. Màn hình chào trực quan khi chưa có ảnh (Onboarding Empty State)**
+- *Hiện trạng:* Lần đầu người dùng mở LitePic hoặc khi xoá hết thư mục ảnh, widget ẩn hoàn toàn (`orderOut(nil)`), Dock không có icon (`LSUIElement = true`), khiến người dùng ngỡ app không hoạt động hoặc bị lỗi.
+- *Cách giải quyết:* Khi `images.isEmpty`, hiển thị khung widget kích thước 320×220pt với chất liệu kính mờ macOS (`NSVisualEffectView` với `.hudWindow`), bo góc 18pt, icon biểu tượng `photo.on.rectangle.angled` và dòng chữ hướng dẫn: *"Kéo thả thư mục ảnh vào đây\nhoặc Bấm để chọn thư mục"*. Nhấp chuột vào khung trống sẽ kích hoạt ngay hộp thoại `chooseFolders()`. Hỗ trợ kéo thả thư mục/ảnh trực tiếp từ Finder vào khung rỗng.
+
+**2. Vuốt Trackpad 2 ngón hoặc lăn chuột để lật ảnh Trước / Sau**
+- *Hiện trạng:* Người dùng phải rê chuột tìm cụm nút ‹ › nhỏ ở góc trên để chuyển ảnh bằng tay.
+- *Cách giải quyết:* Override `scrollWheel(with:)` trong `DraggableView`. Tự động nhận diện trục cuộn ưu thế (ngang `deltaX` cho Trackpad 2 ngón, hoặc dọc `deltaY` cho chuột bi/con lăn), bỏ qua cuộn quán tính (`event.momentumPhase`) để tránh trượt ảnh dồn dập sau khi nhấc tay, tích luỹ ngưỡng cuộn và debounce 0.25s để kích hoạt `onSwipeNext` / `onSwipePrev`.
+
+**3. Chuyển cảnh mượt mà giữa ảnh ngang và ảnh dọc (Aspect Ratio Transition)**
+- *Hiện trạng:* Khi chuyển đổi giữa ảnh ngang và ảnh dọc, `layout()` gán kích thước mới cho cả hai lớp `imageView` và `topView`. Lớp ảnh cũ (`shown`) đang trong quá trình `crossfade` 0.3s bị co rúm, méo giật hoặc cắt tỉa đột ngột trước khi biến mất.
+- *Cách giải quyết:* Bổ sung tham số `layout(preserveOutgoingFrame:)`. Trong suốt thời gian mờ dần 0.3s, lớp ảnh cũ giữ nguyên tỉ lệ và kích thước ban đầu, được neo cân đối tại chính tâm của khung ảnh mới (`r.midX, r.midY`). Khi lớp cũ đã mờ hẳn (`opacity == 0`), frame mới được đồng bộ lại với lớp ảnh đang hiển thị.
+
+**4. Thao tác nhanh trên Context Menu: "Sao chép ảnh" & "Bỏ qua ảnh này"**
+- *Hiện trạng:* Thiếu các thao tác nhanh thường dùng khi xem ảnh.
+- *Cách giải quyết:*
+  - *"Sao chép ảnh":* Ghi đồng thời `NSURL` và `NSImage` vào `NSPasteboard.general`. Cho phép dán ảnh trực tiếp vào Telegram, Slack, Notes, v.v., hoặc dán đường dẫn file vào Finder.
+  - *"Bỏ qua ảnh này":* Lưu đường dẫn ảnh vào `settings.excludedPaths`, tự động loại trừ bức ảnh đó khỏi vòng lặp chiếu của LitePic mà không can thiệp hay xoá file gốc trên đĩa. Khi có ảnh bị bỏ qua, menu tự động hiển thị thêm mục *"Khôi phục N ảnh đã bỏ qua"* để hoàn tác bất kỳ lúc nào.
+
+**5. Tuỳ chọn "Bao gồm thư mục con" (Include Subfolders)**
+- *Hiện trạng:* `ImageStore.files(in:)` trước đây sử dụng cờ `.skipsSubdirectoryDescendants`, khiến LitePic không đọc được ảnh trong các album hoặc thư mục phân cấp theo năm/tháng.
+- *Cách giải quyết:* Thêm tuỳ chọn `includeSubfolders` (mặc định `true`) trong Settings và menu. Khi bật, sử dụng `FileManager.default.enumerator(at:...)` để quét đệ quy các thư mục con, đồng thời chuẩn hoá đường dẫn (`standardizedFileURL.path`) để xử lý triệt để liên kết ảo (symlink) và đường dẫn `/private/var` trên macOS.
+
 
 
 

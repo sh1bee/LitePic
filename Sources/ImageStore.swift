@@ -72,19 +72,47 @@ enum ImageStore {
 
     /// Liệt kê file ảnh trong các thư mục đã chọn (hỗ trợ nhiều thư mục / nhiều "album").
     /// Được sắp xếp theo thứ tự chữ cái tự nhiên (như Finder) thay vì thứ tự thô ngẫu nhiên của APFS.
-    static func files(in folders: [URL]) -> [URL] {
+    /// Hỗ trợ quét đệ quy các thư mục con và loại trừ các ảnh đã bị bỏ qua.
+    static func files(in folders: [URL], includeSubfolders: Bool = true, excludedPaths: Set<String> = []) -> [URL] {
         let fm = FileManager.default
         var out: [URL] = []
+        let excluded: Set<String> = excludedPaths.isEmpty ? [] : Set(
+            excludedPaths.flatMap { p in [p, URL(fileURLWithPath: p).standardizedFileURL.path] }
+        )
         for folder in folders {
-            guard let items = try? fm.contentsOfDirectory(
-                at: folder,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-            ) else { continue }
-            let matched = items
-                .filter { supported.contains($0.pathExtension.lowercased()) }
-                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            out.append(contentsOf: matched)
+            if includeSubfolders {
+                guard let enumerator = fm.enumerator(
+                    at: folder,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) else { continue }
+                var matched: [URL] = []
+                for case let fileURL as URL in enumerator {
+                    guard supported.contains(fileURL.pathExtension.lowercased()) else { continue }
+                    if !excluded.isEmpty && (excluded.contains(fileURL.path) || excluded.contains(fileURL.standardizedFileURL.path)) {
+                        continue
+                    }
+                    matched.append(fileURL)
+                }
+                matched.sort { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                out.append(contentsOf: matched)
+            } else {
+                guard let items = try? fm.contentsOfDirectory(
+                    at: folder,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+                ) else { continue }
+                let matched = items
+                    .filter {
+                        guard supported.contains($0.pathExtension.lowercased()) else { return false }
+                        if !excluded.isEmpty && (excluded.contains($0.path) || excluded.contains($0.standardizedFileURL.path)) {
+                            return false
+                        }
+                        return true
+                    }
+                    .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                out.append(contentsOf: matched)
+            }
         }
         return out
     }

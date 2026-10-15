@@ -19,6 +19,12 @@ final class DraggableView: NSView {
     var onHover: ((Bool) -> Void)?
     /// Người dùng thả file/thư mục từ Finder vào widget.
     var onFilesDropped: (([URL]) -> Void)?
+    /// Chuyển ảnh Trước / Sau khi vuốt Trackpad 2 ngón hoặc lăn chuột
+    var onSwipeNext: (() -> Void)?
+    var onSwipePrev: (() -> Void)?
+
+    private var scrollDelta: CGFloat = 0
+    private var lastSwipeTime: TimeInterval = 0
 
     /// Phiên kéo hiện tại.
     let session = DragSession()
@@ -45,6 +51,59 @@ final class DraggableView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         session.begin(in: self, event: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        // Không nhận cuộn khi đang kéo widget
+        guard !isPressed, !isDragging else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        // Bỏ qua cuộn quán tính (momentum) để không lật dồn dập hàng loạt ảnh sau khi buông tay
+        if !event.momentumPhase.isEmpty {
+            scrollDelta = 0
+            return
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+
+        if event.phase == .began {
+            scrollDelta = 0
+        }
+
+        // Chọn trục cuộn ưu thế (ngang deltaX cho Trackpad, hoặc dọc deltaY cho chuột bi/con lăn)
+        let dx = event.scrollingDeltaX
+        let dy = event.scrollingDeltaY
+        let delta = abs(dx) >= abs(dy) ? dx : dy
+
+        if event.phase == .changed {
+            scrollDelta += delta
+            if now - lastSwipeTime > 0.25 {
+                if scrollDelta < -20 {
+                    lastSwipeTime = now
+                    scrollDelta = 0
+                    onSwipeNext?()
+                } else if scrollDelta > 20 {
+                    lastSwipeTime = now
+                    scrollDelta = 0
+                    onSwipePrev?()
+                }
+            }
+        } else if event.phase == .ended || event.phase == .cancelled {
+            scrollDelta = 0
+        } else if event.phase.isEmpty {
+            // Chuột thông thường không có phase: nhận delta trực tiếp với debounce
+            if now - lastSwipeTime > 0.25 {
+                if delta < -2 {
+                    lastSwipeTime = now
+                    onSwipeNext?()
+                } else if delta > 2 {
+                    lastSwipeTime = now
+                    onSwipePrev?()
+                }
+            }
+        }
     }
 
     // MARK: - Kéo thả từ Finder
@@ -283,6 +342,79 @@ final class ImageCanvas: NSView {
     }
 }
 
+/// Giao diện hướng dẫn trực quan khi chưa có ảnh nào (lần đầu mở app hoặc đã xoá hết thư mục).
+final class EmptyStateView: NSView {
+    private let visualEffect = NSVisualEffectView()
+    private let iconView = NSImageView()
+    private let label = NSTextField(labelWithString: "Kéo thả thư mục ảnh vào đây\nhoặc Bấm để chọn thư mục")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        wantsLayer = true
+        layer?.cornerRadius = 18
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.borderWidth = 1.0
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.25).cgColor
+
+        visualEffect.material = .hudWindow
+        visualEffect.blendingMode = .behindWindow
+        visualEffect.state = .active
+        visualEffect.autoresizingMask = [.width, .height]
+        visualEffect.frame = bounds
+        visualEffect.wantsLayer = true
+        visualEffect.layer?.cornerRadius = 18
+        visualEffect.layer?.cornerCurve = .continuous
+        visualEffect.layer?.masksToBounds = true
+        addSubview(visualEffect)
+
+        let config = NSImage.SymbolConfiguration(pointSize: 40, weight: .regular)
+        let img = NSImage(systemSymbolName: "photo.on.rectangle.angled", accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+        iconView.image = img
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        visualEffect.addSubview(iconView)
+
+        label.alignment = .center
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.maximumNumberOfLines = 2
+        label.isEditable = false
+        label.isSelectable = false
+        label.drawsBackground = false
+        label.isBezeled = false
+        visualEffect.addSubview(label)
+    }
+
+    override func layout() {
+        super.layout()
+        visualEffect.frame = bounds
+
+        let iconW: CGFloat = 50
+        let iconH: CGFloat = 44
+        let labelH: CGFloat = 38
+        let spacing: CGFloat = 12
+        let midY = bounds.midY
+
+        iconView.frame = NSRect(x: (bounds.width - iconW) / 2,
+                                y: midY + spacing / 2,
+                                width: iconW, height: iconH)
+        label.frame = NSRect(x: 16,
+                             y: midY - spacing / 2 - labelH,
+                             width: bounds.width - 32, height: labelH)
+    }
+}
+
 /// Cửa sổ widget: bo tròn, có bóng, kéo tự do hoặc giữ 2s để khe lưới.
 final class WidgetWindow {
     private let settings = Settings.shared
@@ -291,6 +423,7 @@ final class WidgetWindow {
     let imageView: ImageCanvas
     /// Lớp ảnh thứ hai, chồm lên lớp đầu — dùng để chuyển ảnh mềm.
     let topView: ImageCanvas
+    let emptyView: EmptyStateView
     let overlay = GridOverlay(level: WidgetWindow.desktopLevel + 1)
 
     /// Tầng cho chế độ "Trên wallpaper (dưới app)".
@@ -331,6 +464,9 @@ final class WidgetWindow {
     /// Ảnh đang hiện. Giữ riêng vì `imageView.image` để trống — phần vẽ do
     /// layer đảm nhiệm (xem `refreshImageLayer`).
     private var currentImage: NSImage?
+    var currentImageRef: NSImage? { currentImage }
+    private(set) var isEmptyState = false
+    var onEmptyStateClick: (() -> Void)?
     private var settled = false
 
     /// Số thứ tự lần hiện ảnh. Lần mới hơn làm lần cũ mất hiệu lực — cần khi
@@ -374,9 +510,15 @@ final class WidgetWindow {
         ivTop.layer?.opacity = 1
         topView = ivTop
 
+        let ev = EmptyStateView(frame: iv.frame)
+        ev.autoresizingMask = []
+        ev.isHidden = true
+        emptyView = ev
+
         w.contentView = view
         view.addSubview(iv)
         view.addSubview(topView)
+        view.addSubview(ev)
         controls.isHidden = true
         view.addSubview(controls)
 
@@ -400,9 +542,20 @@ final class WidgetWindow {
         view.onHover = { [weak self] hovering in
             guard let self else { return }
             self.container.isHidden = false
-            self.controls.isHidden = !hovering
+            if !self.isEmptyState {
+                self.controls.isHidden = !hovering
+            } else {
+                self.controls.isHidden = true
+            }
         }
-        s.onDoubleClick = { [weak self] in self?.revealCurrentInFinder() }
+        s.onDoubleClick = { [weak self] in
+            guard let self else { return }
+            if self.isEmptyState {
+                self.onEmptyStateClick?()
+            } else {
+                self.revealCurrentInFinder()
+            }
+        }
         view.registerForDraggedTypes([.fileURL])
 
         applyAppearance()
@@ -489,7 +642,7 @@ final class WidgetWindow {
         setContents(img, on: blank)
         blank.displayIfNeeded()          // vẽ ngay, không đợi vòng chạy kế
         setOpacity(blank, to: 1)         // tức thì — giữ dưới lớp cũ nên không nhảy
-        fade(shown, to: 0) { [weak shown] in
+        fade(shown, to: 0) { [weak shown, weak blank] in
             // Sau khi mờ hẳn, giải phóng bitmap và backing store của lớp ảnh cũ
             // để chỉ giữ duy nhất 1 ảnh trong VRAM/RAM thay vì 2 giữa các chu kỳ.
             // Đặt `isHidden = true` để AppKit không tự động tái cấp phát vùng nhớ backing store rỗng.
@@ -497,6 +650,7 @@ final class WidgetWindow {
             shown.isHidden = true
             shown.image = nil
             shown.layer?.contents = nil
+            if let blank { shown.frame = blank.frame }
         }
     }
 
@@ -654,7 +808,7 @@ private func liftRoom(_ imageSize: NSSize) -> NSSize {
                   height: max(4, imageSize.height * k))
 }
 
-private func layout() {
+    private func layout(preserveOutgoingFrame: NSSize? = nil) {
         let i = frameInset, b = frameBottom, p = framePad
         let room = liftRoom(imageSize)
         window.setContentSize(NSSize(width: imageSize.width + (i + p) * 2 + room.width * 2,
@@ -671,9 +825,22 @@ private func layout() {
         }
         let r = NSRect(x: i + p + room.width, y: i + p + b + room.height,
                        width: imageSize.width, height: imageSize.height)
-        imageView.frame = r
-        topView.frame = r
-        settings.frameStyle.decorate(in: container, imageRect: imageView.frame)
+
+        let blank = (topView.layer?.opacity ?? 0) > 0.5 ? imageView : topView
+        let shown = (blank === imageView) ? topView : imageView
+
+        blank.frame = r
+        if let oldSize = preserveOutgoingFrame, (shown.layer?.opacity ?? 0) > 0.01 {
+            // Giữ nguyên frame của ảnh cũ theo tâm của r, tránh co rúm hoặc méo giật khi đang crossfade
+            shown.frame = NSRect(x: r.midX - oldSize.width / 2,
+                                 y: r.midY - oldSize.height / 2,
+                                 width: oldSize.width,
+                                 height: oldSize.height)
+        } else {
+            shown.frame = r
+        }
+        emptyView.frame = r
+        settings.frameStyle.decorate(in: container, imageRect: r)
         layoutControls()
         updateShadowPath()
     }
@@ -702,8 +869,9 @@ private func layout() {
         let blur = CGFloat(l.shadowRadius)
         let r = settings.frameStyle.imageCorner + blur * 0.75
         let grow = blur * 0.35
+        let targetRect = isEmptyState ? emptyView.frame : imageView.frame
         l.shadowPath = CGPath(
-            roundedRect: imageView.frame.insetBy(dx: -grow, dy: -grow),
+            roundedRect: targetRect.insetBy(dx: -grow, dy: -grow),
             cornerWidth: r, cornerHeight: r, transform: nil)
     }
 
@@ -730,6 +898,8 @@ private func layout() {
     /// mục" bị hỏng.
     func clear() {
         showToken += 1
+        isEmptyState = false
+        emptyView.isHidden = true
         currentImage = nil
         currentURL = nil
         imageView.image = nil
@@ -743,6 +913,30 @@ private func layout() {
         window.orderOut(nil)
     }
 
+    /// Hiện màn hình chào/hướng dẫn khi chưa có ảnh nào.
+    func showEmpty(onClick: (() -> Void)? = nil) {
+        showToken += 1
+        isEmptyState = true
+        onEmptyStateClick = onClick
+        currentImage = nil
+        currentURL = nil
+        imageView.image = nil
+        imageView.layer?.contents = nil
+        imageView.isHidden = true
+        topView.image = nil
+        topView.layer?.contents = nil
+        topView.isHidden = true
+        overlay.hide()
+        setControlsVisible(false)
+
+        imageSize = NSSize(width: 320, height: 220)
+        applyAppearance()
+        layout()
+        emptyView.isHidden = false
+        window.alphaValue = settings.opacity
+        window.orderFrontRegardless()
+    }
+
     func setPinned(_ p: Bool) { controls.isPinned = p }
 
     /// Gắn hành động cho nút — AppController nối vào danh sách ảnh.
@@ -752,6 +946,8 @@ private func layout() {
         controls.onPrev = onPrev
         controls.onNext = onNext
         controls.onTogglePin = onPin
+        container.onSwipePrev = onPrev
+        container.onSwipeNext = onNext
     }
 
     /// Nối xử lý khi người dùng thả file/thư mục từ Finder vào widget.
@@ -818,11 +1014,14 @@ private func layout() {
     private func applyImage(_ img: NSImage, url: URL, size target: NSSize) {
         let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
 
+        let oldImageSize = imageSize
         currentImage = img
         currentURL = url
         imageSize = target
+        isEmptyState = false
+        emptyView.isHidden = true
         applyAppearance()
-        layout()
+        layout(preserveOutgoingFrame: oldImageSize)
         // Đặt khung trước rồi mới mờ ảnh — nếu mờ trước, giữa lúc chuyển sẽ
         // thấy ảnh cũ ở khung cũ rồi nhảy sang khung mới.
         crossfade(to: img)
@@ -976,7 +1175,9 @@ private func ensureSlots() {
             // Kéo tự do: giữ đúng chỗ người dùng thả.
             settings.savedOrigin = window.frame.origin
         case .click:
-            break
+            if isEmptyState {
+                onEmptyStateClick?()
+            }
         }
     }
 

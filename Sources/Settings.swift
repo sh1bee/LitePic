@@ -74,6 +74,8 @@ final class Settings {
         static let frameStyle = "frameStyle"
         static let posX          = "posX"
         static let posY          = "posY"
+        static let includeSubfolders = "includeSubfolders"
+        static let excludedPaths     = "excludedPaths"
     }
 
     // MARK: - Nguồn ảnh
@@ -203,5 +205,17 @@ final class Settings {
             d.set(Double(newValue.x), forKey: K.posX)
             d.set(Double(newValue.y), forKey: K.posY)
         }
+    }
+
+    /// Quét đệ quy toàn bộ thư mục con khi liệt kê ảnh.
+    var includeSubfolders: Bool {
+        get { d.object(forKey: K.includeSubfolders) == nil ? true : d.bool(forKey: K.includeSubfolders) }
+        set { d.set(newValue, forKey: K.includeSubfolders) }
+    }
+
+    /// Danh sách đường dẫn ảnh người dùng chọn "Bỏ qua ảnh này" (không chiếu, không xoá đĩa).
+    var excludedPaths: Set<String> {
+        get { Set(d.stringArray(forKey: K.excludedPaths) ?? []) }
+        set { d.set(Array(newValue), forKey: K.excludedPaths) }
     }
 }

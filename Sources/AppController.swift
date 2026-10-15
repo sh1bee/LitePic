@@ -9,7 +9,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var images: [URL] = []
     private var lastIndex: Int = -1
     /// Lịch sử các ảnh đã xem gần đây (để nút ‹ lùi đúng về ảnh vừa chiếu)
-    private var history: [Int] = []
+    private var history: [String] = []
 
     /// Ảnh đang ghim — bộ đếm bỏ qua nó để không đổi vô ích.
     private var isPinned: Bool { settings.pinnedURL != nil }
@@ -456,8 +456,8 @@ final class AppController: NSObject, NSApplicationDelegate {
             idx = Int.random(in: 0..<images.count)
             if idx == lastIndex { idx = (idx + 1) % images.count }  // tránh lặp lại liên tiếp
         }
-        if lastIndex >= 0 && lastIndex < images.count {
-            history.append(lastIndex)
+        if images.indices.contains(lastIndex) {
+            history.append(images[lastIndex].path)
             if history.count > 30 { history.removeFirst() }
         }
         lastIndex = idx
@@ -492,15 +492,18 @@ final class AppController: NSObject, NSApplicationDelegate {
         let next: Int
         if delta < 0 {
             // Khi bấm nút Trước (‹), lùi về ảnh vừa xem trước đó trong lịch sử
-            if let prev = history.popLast(), prev < images.count {
-                next = prev
-            } else {
-                next = ((cur + delta) % images.count + images.count) % images.count
+            var foundPrev: Int? = nil
+            while let prevPath = history.popLast() {
+                if let idx = images.firstIndex(where: { $0.path == prevPath }), idx != cur {
+                    foundPrev = idx
+                    break
+                }
             }
+            next = foundPrev ?? (((cur + delta) % images.count + images.count) % images.count)
         } else {
             // Khi bấm nút Kế tiếp (›), lưu ảnh hiện tại vào lịch sử rồi tiến tới ảnh kế
-            if lastIndex >= 0 && lastIndex < images.count {
-                history.append(lastIndex)
+            if images.indices.contains(lastIndex) {
+                history.append(images[lastIndex].path)
                 if history.count > 30 { history.removeFirst() }
             }
             next = (cur + delta) % images.count
@@ -657,13 +660,13 @@ final class AppController: NSObject, NSApplicationDelegate {
         settings.excludedPaths = excluded
 
         images.removeAll { $0.path == path }
-        history.removeAll { images.indices.contains($0) && images[$0].path == path }
+        history.removeAll { $0 == path }
         if isPinned && settings.pinnedURL == path {
             settings.pinnedURL = nil
             widget.setPinned(false)
         }
+        lastIndex = -1
         if images.isEmpty {
-            lastIndex = -1
             widget.showEmpty { [weak self] in self?.chooseFolders() }
         } else {
             advance()

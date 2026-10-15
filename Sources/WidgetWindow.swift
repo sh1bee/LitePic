@@ -140,9 +140,14 @@ final class DraggableView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let t = tracking { removeTrackingArea(t) }
-        let area = NSTrackingArea(rect: bounds,
-                                  options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect, .assumeInside],
-                                  owner: self, userInfo: nil)
+        var opts: NSTrackingArea.Options = [.activeAlways, .mouseEnteredAndExited, .inVisibleRect]
+        if let w = window {
+            let mouseInWindow = w.mouseLocationOutsideOfEventStream
+            if bounds.contains(convert(mouseInWindow, from: nil)) {
+                opts.insert(.assumeInside)
+            }
+        }
+        let area = NSTrackingArea(rect: bounds, options: opts, owner: self, userInfo: nil)
         addTrackingArea(area)
         tracking = area
     }
@@ -480,6 +485,7 @@ final class WidgetWindow {
     private var framePad: CGFloat { settings.frameStyle.pad }
     var activeSlots: [NSPoint] = []
     private weak var activeScreen: NSScreen?
+    private var slotsImageSize: NSSize = .zero
 
     /// Đang giữ chuột hoặc đang kéo — AppController hoãn đổi ảnh lúc này để
     /// cửa sổ không bị giật khỏi tay người dùng.
@@ -642,7 +648,7 @@ final class WidgetWindow {
         setContents(img, on: blank)
         blank.displayIfNeeded()          // vẽ ngay, không đợi vòng chạy kế
         setOpacity(blank, to: 1)         // tức thì — giữ dưới lớp cũ nên không nhảy
-        fade(shown, to: 0) { [weak shown, weak blank] in
+        fade(shown, to: 0) { [weak shown, weak blank, weak self] in
             // Sau khi mờ hẳn, giải phóng bitmap và backing store của lớp ảnh cũ
             // để chỉ giữ duy nhất 1 ảnh trong VRAM/RAM thay vì 2 giữa các chu kỳ.
             // Đặt `isHidden = true` để AppKit không tự động tái cấp phát vùng nhớ backing store rỗng.
@@ -651,6 +657,8 @@ final class WidgetWindow {
             shown.image = nil
             shown.layer?.contents = nil
             if let blank { shown.frame = blank.frame }
+            self?.layoutControls()
+            self?.updateShadowPath()
         }
     }
 
@@ -840,9 +848,20 @@ private func liftRoom(_ imageSize: NSSize) -> NSSize {
             shown.frame = r
         }
         emptyView.frame = r
-        settings.frameStyle.decorate(in: container, imageRect: r)
+        if isEmptyState {
+            FrameStyle.none.decorate(in: container, imageRect: r)
+        } else {
+            settings.frameStyle.decorate(in: container, imageRect: r)
+        }
         layoutControls()
         updateShadowPath()
+    }
+
+    private var targetImageRect: NSRect {
+        let i = frameInset, b = frameBottom, p = framePad
+        let room = liftRoom(imageSize)
+        return NSRect(x: i + p + room.width, y: i + p + b + room.height,
+                      width: imageSize.width, height: imageSize.height)
     }
 
     /// Cho biết chính xác hình dạng nào đổ bóng.
@@ -869,7 +888,7 @@ private func liftRoom(_ imageSize: NSSize) -> NSSize {
         let blur = CGFloat(l.shadowRadius)
         let r = settings.frameStyle.imageCorner + blur * 0.75
         let grow = blur * 0.35
-        let targetRect = isEmptyState ? emptyView.frame : imageView.frame
+        let targetRect = isEmptyState ? emptyView.frame : targetImageRect
         l.shadowPath = CGPath(
             roundedRect: targetRect.insetBy(dx: -grow, dy: -grow),
             cornerWidth: r, cornerHeight: r, transform: nil)
@@ -879,7 +898,7 @@ private func liftRoom(_ imageSize: NSSize) -> NSSize {
     private func layoutControls() {
         // Dán theo khung THẬT của ảnh, không tự tính lại từ kích thước ảnh:
         // vùng ảnh đã lệch trong container bởi viền trong suốt + khung.
-        controls.place(atTopRightOf: imageView.frame)
+        controls.place(atTopRightOf: isEmptyState ? emptyView.frame : targetImageRect)
         container.addSubview(controls, positioned: .above, relativeTo: nil)
     }
 
@@ -1088,10 +1107,11 @@ private var imageOrigin: NSPoint {
             y: window.frame.minY + imageInset.y)
 }
 
-private func ensureSlots() {
+    private func ensureSlots() {
         guard let s = currentScreen() else { return }
-        if activeScreen !== s || activeSlots.isEmpty {
+        if activeScreen !== s || activeSlots.isEmpty || slotsImageSize != imageSize {
             activeScreen = s
+            slotsImageSize = imageSize
             activeSlots = snapSlots(size: imageSize, on: s)
         }
     }

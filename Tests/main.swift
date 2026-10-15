@@ -34,6 +34,7 @@ import UniformTypeIdentifiers
 Diag.enabled = true
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+let savedLevelMode = UserDefaults.standard.object(forKey: "levelMode")
 Settings.shared.levelMode = .floating
 
 /// Sinh ảnh JPEG thử riêng trong thư mục tạm.
@@ -85,6 +86,7 @@ let imageURL = makeDummyTestImage()
 /// Ghi lai moi su kien callback cua mot widget, dong thoi van chay wiring goc.
 final class Recorder {
     var armed = false, hinted = false, hintCancelled = false
+    var armTime: Date? = nil
     var dragCount = 0, snapCount = 0
     var drop: DropResult? = nil
     var dropTime: Date? = nil
@@ -102,8 +104,8 @@ final class Recorder {
         s.onArmed = {
             gArmed?()
             self.armed = true
-            self.slotsAtArm = Mirror(reflecting: w).children
-                .first { $0.label == "activeSlots" }?.value as? [NSPoint] ?? []
+            self.armTime = Date()
+            self.slotsAtArm = w.activeSlots
         }
         let gDrag = s.onDrag
         s.onDrag = { o in gDrag?(o); self.dragCount += 1 }
@@ -165,10 +167,7 @@ func after(_ d: TimeInterval, _ f: @escaping () -> Void) {
 func snapReport(_ w: WidgetWindow, _ slots: [NSPoint]) -> (Bool, String) {
     // Cửa sổ có viền trong suốt (chừa chỗ cho lúc widget nâng lên), nên phải
     // so vị trí của ẢNH — cùng cách `WidgetWindow` bám lưới theo ảnh.
-    let M = { (o: Any, _ l: String) -> Any? in
-        Mirror(reflecting: o).children.first { $0.label == l }?.value }
-    let container = M(w, "container") as! NSView
-    let inset = container.subviews.first { $0 is ImageCanvas }?.frame.origin ?? .zero
+    let inset = w.container.subviews.first { $0 is ImageCanvas }?.frame.origin ?? .zero
     let pos = NSPoint(x: w.window.frame.minX + inset.x,
                       y: w.window.frame.minY + inset.y)
     guard let n = slots.min(by: {
@@ -180,7 +179,10 @@ func snapReport(_ w: WidgetWindow, _ slots: [NSPoint]) -> (Bool, String) {
                    pos.x, pos.y, n.x, n.y, d))
 }
 
+var failures = 0
+
 func line(_ ok: Bool, _ label: String, _ detail: String = "") {
+    if !ok { failures += 1 }
     print("  \(ok ? "✓" : "✗") \(label)\(detail.isEmpty ? "" : "  —  " + detail)")
 }
 
@@ -208,8 +210,9 @@ do {
     line(r.armed, "luoi co bat", "o tai luc bat: \(r.slotsAtArm.count)")
     // O phuong an nay luoi chi bat SAU khi dung lai nen khong co phat
     // onSnapDrag — do la dung. Phep do keo trong khi da bat luoi nam o G).
+    let armElapsed = r.armTime.map { String(format: "%.2fs", $0.timeIntervalSince(t0)) } ?? "chua bat"
     line(r.snapCount == 0, "dung: khong co phat snap luc nay",
-         "luoi bat luc \(String(format: "%.2f", r.dropTime!.timeIntervalSince(Date().addingTimeInterval(0))))s — sau khi keo xong")
+         "luoi bat luc \(armElapsed) — sau khi keo xong")
     line(r.drop == .snap, "ket qua la .snap", "tho: \(r.drop.map { "\($0)" } ?? "nil")")
     line(hit, "widget THAT SU khe vao o", detail)
     line(r.ended, "ket thuc sach (onEnd chay)")
@@ -308,9 +311,7 @@ do {
     line(!view.isPressed, "isPressed = false (khong ket)")
     line(!view.isDragging, "isDragging = false (khong ket)")
     line(r.ended, "onEnd duoc goi (cursor tra lai)")
-    let overlay = Mirror(reflecting: w).children
-        .first { $0.label == "overlay" }?.value as! GridOverlay
-    line(!overlay.isVisible, "overlay khong bi khet sau khi tha ngoai")
+    line(!w.overlay.isVisible, "overlay khong bi khet sau khi tha ngoai")
     w.window.close()
 }
 
@@ -370,10 +371,8 @@ print("H) Giu cho luoi bat roi tha -> ANH PHAI CON (khong mat trang)")
 // do pixel: pixel chi cho biet "co/khong", `contents` cho biet TAI SAO.
 do {
     let (w, view) = makeWidget()
-    let M = { (o: Any, _ l: String) -> Any? in
-        Mirror(reflecting: o).children.first { $0.label == l }?.value }
-    let imageView = M(w, "imageView") as! ImageCanvas
-    let topView = M(w, "topView") as! ImageCanvas
+    let imageView = w.imageView
+    let topView = w.topView
     func hasImage() -> Bool {
         imageView.image != nil || topView.image != nil
     }
@@ -468,10 +467,8 @@ print("J) Bo thu muc -> anh phai bien mat, khong phai 'bong ma'")
 // ============================================================
 do {
     let (w, _) = makeWidget()
-    let M = { (o: Any, _ l: String) -> Any? in
-        Mirror(reflecting: o).children.first { $0.label == l }?.value }
-    let iv = M(w, "imageView") as! ImageCanvas
-    let tv = M(w, "topView") as! ImageCanvas
+    let iv = w.imageView
+    let tv = w.topView
     func hasImage() -> Bool { iv.image != nil || tv.image != nil }
     let t0 = Date()
     while !hasImage() && Date().timeIntervalSince(t0) < 8 {
@@ -483,6 +480,7 @@ do {
     w.clear()
     RunLoop.current.run(until: Date().addingTimeInterval(0.3))
     line(!hasImage(), "sau clear() khong con anh nao giu lai")
+    line(w.currentURL == nil, "sau clear() currentURL da ve nil")
     line(!w.window.isVisible, "sau clear() cua so da an")
     w.window.close()
 }
@@ -524,5 +522,16 @@ do {
 
 // ============================================================
 print("")
-print("Xong.")
-exit(0)
+if let saved = savedLevelMode {
+    UserDefaults.standard.set(saved, forKey: "levelMode")
+} else {
+    UserDefaults.standard.removeObject(forKey: "levelMode")
+}
+
+if failures == 0 {
+    print("Xong: Tat ca cac test deu thanh cong.")
+    exit(0)
+} else {
+    print("THAT BAI: Co \(failures) phep kiem tra khong dat.")
+    exit(1)
+}

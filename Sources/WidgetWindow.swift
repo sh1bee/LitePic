@@ -30,9 +30,17 @@ final class DraggableView: NSView {
 
     /// Mấu chốt để kéo hoạt động: `ImageCanvas` phủ kín toàn bộ cửa sổ, nên mặc
     /// định hit-test trả về chính imageView và các sự kiện chuột không bao giờ
-    /// tới `DraggableView`. Mọi điểm trong biên đều trả về `self`.
+    /// tới `DraggableView`. Mọi điểm trong biên đều trả về `self`, trừ khi bấm
+    /// trúng cụm nút `WidgetControls` đang hiển thị.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        if let c = subviews.first(where: { $0 is WidgetControls }),
+           !c.isHidden,
+           let hit = c.hitTest(local) {
+            return hit
+        }
+        return self
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -74,8 +82,8 @@ final class DraggableView: NSView {
         super.updateTrackingAreas()
         if let t = tracking { removeTrackingArea(t) }
         let area = NSTrackingArea(rect: bounds,
-                                 options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect],
-                                 owner: self, userInfo: nil)
+                                  options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+                                  owner: self, userInfo: nil)
         addTrackingArea(area)
         tracking = area
     }
@@ -253,11 +261,11 @@ final class ImageCanvas: NSView {
 final class WidgetWindow {
     private let settings = Settings.shared
     let window: NSWindow
-    private let container: DraggableView
-    private let imageView: ImageCanvas
+    let container: DraggableView
+    let imageView: ImageCanvas
     /// Lớp ảnh thứ hai, chồm lên lớp đầu — dùng để chuyển ảnh mềm.
-    private let topView: ImageCanvas
-    private let overlay = GridOverlay(level: WidgetWindow.desktopLevel + 1)
+    let topView: ImageCanvas
+    let overlay = GridOverlay(level: WidgetWindow.desktopLevel + 1)
 
     /// Tầng cho chế độ "Trên wallpaper (dưới app)".
     ///
@@ -293,7 +301,7 @@ final class WidgetWindow {
     private let controls = WidgetControls()
     private var imageSize = NSSize(width: 400, height: 300)
     /// Ảnh đang hiện, để mở trong Finder.
-    private var currentURL: URL?
+    private(set) var currentURL: URL?
     /// Ảnh đang hiện. Giữ riêng vì `imageView.image` để trống — phần vẽ do
     /// layer đảm nhiệm (xem `refreshImageLayer`).
     private var currentImage: NSImage?
@@ -308,16 +316,18 @@ final class WidgetWindow {
     private var frameInset: CGFloat { settings.frameStyle.inset }
     private var frameBottom: CGFloat { settings.frameStyle.extraBottom }
     private var framePad: CGFloat { settings.frameStyle.pad }
-    private var activeSlots: [NSPoint] = []
+    var activeSlots: [NSPoint] = []
     private weak var activeScreen: NSScreen?
 
     /// Đang giữ chuột hoặc đang kéo — AppController hoãn đổi ảnh lúc này để
     /// cửa sổ không bị giật khỏi tay người dùng.
     var busy: Bool { container.isPressed || container.isDragging }
+    var onLevelChanged: (() -> Void)?
 
     init() {
         let view = DraggableView(frame: NSRect(x: 0, y: 0, width: 440, height: 340))
         container = view
+        view.wantsLayer = true
 
         let w = NSWindow(contentRect: view.frame, styleMask: [.borderless],
                          backing: .buffered, defer: false)
@@ -442,11 +452,11 @@ final class WidgetWindow {
         let blank = (topView.layer?.opacity ?? 0) > 0.5 ? imageView : topView
         let shown = (blank === imageView) ? topView : imageView
 
+        container.addSubview(blank, positioned: .below, relativeTo: shown)
         setContents(img, on: blank)
         blank.displayIfNeeded()          // vẽ ngay, không đợi vòng chạy kế
         setOpacity(blank, to: 1)         // tức thì — giữ dưới lớp cũ nên không nhảy
         fade(shown, to: 0)               // chỉ lớp này chuyển động
-        container.addSubview(blank, positioned: .below, relativeTo: controls)
     }
 
     /// Đặt opacity tức thì, không animate — ngược lại với `fade`.
@@ -545,12 +555,36 @@ final class WidgetWindow {
     @discardableResult
     func autoLiftIfOccluded() -> Bool {
         guard settings.levelMode == .desktop else { return false }
-        let hidden = NSApp.windows.filter { window !== $0 && $0.isVisible
-            && $0.frame.intersects(window.frame) && $0.level > window.level }
-        guard !hidden.isEmpty else { return false }
-        settings.levelMode = .floating
-        applyLevel()
-        return true
+        let wid = CGWindowID(window.windowNumber)
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow, .excludeDesktopElements], wid) as? [[String: Any]],
+              let mainScreen = NSScreen.screens.first else { return false }
+        let screenHeight = mainScreen.frame.height
+        let appKitFrame = window.frame
+        let myPID = ProcessInfo.processInfo.processIdentifier
+
+        for info in list {
+            if let pid = info[kCGWindowOwnerPID as String] as? Int32, pid == myPID {
+                continue
+            }
+            if let layer = info[kCGWindowLayer as String] as? Int, layer != 0 {
+                continue
+            }
+            if let alpha = info[kCGWindowAlpha as String] as? Double, alpha < 0.1 { continue }
+            guard let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                  let cgRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
+            guard cgRect.width > 20, cgRect.height > 20 else { continue }
+            let appKitRect = NSRect(x: cgRect.origin.x,
+                                    y: screenHeight - cgRect.origin.y - cgRect.height,
+                                    width: cgRect.width,
+                                    height: cgRect.height)
+            if appKitRect.intersects(appKitFrame) {
+                settings.levelMode = .floating
+                applyLevel()
+                onLevelChanged?()
+                return true
+            }
+        }
+        return false
     }
 
     /// Khoảng trống chừa sẵn trong cửa sổ cho lúc widget "nâng" lên khi giữ chuột.
@@ -588,7 +622,7 @@ private func layout() {
             cl.anchorPoint = CGPoint(x: 0.5, y: 0.5)
             cl.position = CGPoint(x: container.bounds.midX, y: container.bounds.midY)
         }
-        let r = NSRect(x: i + p + room.width, y: i + p + room.height,
+        let r = NSRect(x: i + p + room.width, y: i + p + b + room.height,
                        width: imageSize.width, height: imageSize.height)
         imageView.frame = r
         topView.frame = r
@@ -647,7 +681,9 @@ private func layout() {
     /// chình ình trên màn hình **vĩnh viễn**. Người dùng dễ tưởng nút "Bỏ thư
     /// mục" bị hỏng.
     func clear() {
+        showToken += 1
         currentImage = nil
+        currentURL = nil
         imageView.image = nil
         topView.image = nil
         overlay.hide()
@@ -701,6 +737,11 @@ private func layout() {
                 : NSSize(width: (m * aspect).rounded(), height: m)
         }
 
+        // Tăng token ngay từ đầu để vô hiệu hoá mọi lượt tải nền cũ đang chạy,
+        // kể cả khi ảnh mới có sẵn trong RAM.
+        showToken += 1
+        let token = showToken
+
         // Ảnh còn trong RAM: đổi tức thì, không cần bố trí hẹn giờ.
         // Đây là đường đi của nút ‹ › và của mọi lần quay lại ảnh vừa xem.
         if let img = ImageStore.inMemory(url, maxPixel: displayMaxPixel) {
@@ -713,11 +754,9 @@ private func layout() {
         // Trước đây việc này chạy thẳng trên luồng chính. Ảnh gốc 3840×2160 mất
         // 0.33s để giải mã — nghĩa là widget đứng hình gần nửa giây. Giờ luồng
         // chính giữ nguyên và ảnh về sau, không về trước.
-        showToken += 1
-        let token = showToken
         let pixel = displayMaxPixel
         ImageStore.load(url, maxPixel: pixel) { [weak self] img in
-            guard let self, let img, self.showToken == token, !self.busy else { return }
+            guard let self, let img, self.showToken == token, (evenIfBusy || !self.busy) else { return }
             self.applyImage(img, url: url, size: target)
         }
     }
@@ -748,6 +787,7 @@ private func layout() {
         if !settled {
             settled = true
             settle()
+            autoLiftIfOccluded()
         }
     }
 
@@ -788,7 +828,7 @@ private func layout() {
 private var imageInset: NSPoint {
     let room = liftRoom(imageSize)
     return NSPoint(x: frameInset + framePad + room.width,
-                   y: frameInset + framePad + room.height)
+                   y: frameInset + framePad + frameBottom + room.height)
 }
 
 /// Góc trên-trái của ảnh theo toạ độ màn hình.

@@ -26,7 +26,14 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-APP="/Applications/LitePic.app/Contents/MacOS/LitePic"
+if [ -d "build/LitePic.app" ]; then
+    APP_BUNDLE="$(pwd)/build/LitePic.app"
+elif [ -d "/Applications/LitePic.app" ]; then
+    APP_BUNDLE="/Applications/LitePic.app"
+else
+    APP_BUNDLE="$(pwd)/build/LitePic.app"
+fi
+APP="$APP_BUNDLE/Contents/MacOS/LitePic"
 BASE="bench/baseline.txt"
 MODE="${1:-check}"
 
@@ -40,7 +47,7 @@ MINUTES="${BENCH_MINUTES:-8}"
 TOL_PCT="${BENCH_TOL:-15}"
 
 die() { echo "LOI: $*" >&2; exit 2; }
-[ -x "$APP" ] || die "khong thay $APP — hay ./build.sh roi cai app truoc"
+[ -x "$APP" ] || die "khong thay $APP — hay ./build.sh truoc"
 
 # ---------------------------------------------------------------------------
 # Cac tro giup do
@@ -110,23 +117,32 @@ median() { sort -n | awk '{a[NR]=$1} END {print (NR%2) ? a[(NR+1)/2] : (a[NR/2]+
 # Do la trang thai dau, khong phai trang thai chay — dung de so sanh hai ban voi
 # nhau, khong dung de so sanh voi muc cu.
 SAVED_RANDOM=""; SAVED_INTERVAL=""
+MODIFIED_SETTINGS=0
 if [ -n "${BENCH_KEEP_SETTINGS:-}" ]; then
     echo "  (BENCH_KEEP_SETTINGS: giu nguyen cau hinh nguoi dung)"
 else
     SAVED_RANDOM="$(defaults read local.litepic.widget randomInterval 2>/dev/null || true)"
     SAVED_INTERVAL="$(defaults read local.litepic.widget interval 2>/dev/null || true)"
+    MODIFIED_SETTINGS=1
 fi
 restore_settings() {
-    [ -z "$SAVED_RANDOM" ] && return 0
-    defaults write local.litepic.widget randomInterval -int "$SAVED_RANDOM"
-    [ -n "$SAVED_INTERVAL" ] && \
+    [ "$MODIFIED_SETTINGS" -eq 1 ] || return 0
+    if [ -n "$SAVED_RANDOM" ]; then
+        defaults write local.litepic.widget randomInterval -int "$SAVED_RANDOM"
+    else
+        defaults delete local.litepic.widget randomInterval 2>/dev/null || true
+    fi
+    if [ -n "$SAVED_INTERVAL" ]; then
         defaults write local.litepic.widget interval -float "$SAVED_INTERVAL"
+    else
+        defaults delete local.litepic.widget interval 2>/dev/null || true
+    fi
     # App doc cau hinh luc khoi dong, nen phai mo lai moi thay hieu luc.
     pkill -x LitePic 2>/dev/null; sleep 1
-    open -a /Applications/LitePic.app 2>/dev/null
+    open -a "$APP_BUNDLE" 2>/dev/null || true
 }
 trap 'restore_settings; rm -rf "$HELPER_DIR"' EXIT
-if [ -n "$SAVED_RANDOM" ]; then
+if [ "$MODIFIED_SETTINGS" -eq 1 ]; then
     defaults write local.litepic.widget randomInterval -int 0
     defaults write local.litepic.widget interval -float 3600
     echo "==> Tam tat vong doi anh trong luc do (se khoi phuc lai)"
@@ -154,7 +170,7 @@ echo "==> Do thoi gian khoi dong..."
 # lại app. Đo được ngay sau `cp -R` vào /Applications là 2.17s, trong khi 8 lần đo
 # sau đó đều ra 0.67-0.78s. Không hứt lần này thì `check` báo LOI launch giả.
 (pkill -x LitePic 2>/dev/null; sleep 1)
-open -a /Applications/LitePic.app; sleep 2
+open -a "$APP_BUNDLE"; sleep 2
 
 # ĐO NHIỀU LẦN, LẤY TRUNG VỊ.
 #
@@ -167,13 +183,13 @@ launch_times=""
 for i in $(seq 1 5); do
     # Ghi lại trước MỖI lần mở: app đọc cấu hình lúc khởi động, nên lần mở sau
     # cùng phải thấy giá trị mới chứ không phải giá trị mà cfprefsd còn cache.
-    if [ -n "$SAVED_RANDOM" ]; then
+    if [ "$MODIFIED_SETTINGS" -eq 1 ]; then
         defaults write local.litepic.widget randomInterval -int 0
         defaults write local.litepic.widget interval -float 3600
     fi
     (pkill -x LitePic 2>/dev/null; sleep 1)
     t0=$(python3 -c 'import time;print(time.time())')
-    open -a /Applications/LitePic.app
+    open -a "$APP_BUNDLE"
     for _ in $(seq 1 200); do
         p="$(pid_of)"; cw="$(count_windows)"
         if [ -n "$p" ] && [ "$cw" != "0" ] && [ "$cw" != "-" ]; then
@@ -237,15 +253,13 @@ n = len(v)
 #
 # KHÔNG bỏ nhầm rò rỉ: rò rỉ là đi **liên tục**, không bao giờ chạm đỉnh sớm, nên
 # gần như toàn bộ mẫu được giữ lại — và `slope` bắt được. `slope` vẫn tính trên
-# lát cắt này.
-peak = max(v)
-flat_start = next((i for i, x in enumerate(v) if x >= peak * 0.95), 0)
-t = v[flat_start:] if len(v) - flat_start >= 4 else v
-m = len(t)
-lo, med, hi = min(t), sorted(t)[m//2], max(t)
-xs = list(range(m)); mx = sum(xs)/m; my = sum(t)/m
-den = sum((x - mx) ** 2 for x in xs)
-slope = (sum((x - mx) * (y - my) for x, y in zip(xs, t)) / den * 4) if den else 0.0
+# Tinh slope hoi quy tren TOAN BO tap mau v sau giai doan khoi dong (da sleep 90s lam am)
+# de phat hien chinh xac ro ri bo nho tuyen tinh thay vi bi che khuat boi lat cat >= 95% peak.
+all_m = len(v)
+all_xs = list(range(all_m)); all_mx = sum(all_xs)/all_m; all_my = sum(v)/all_m
+all_den = sum((x - all_mx) ** 2 for x in all_xs)
+slope = (sum((x - all_mx) * (y - all_my) for x, y in zip(all_xs, v)) / all_den * 4) if all_den else 0.0
+lo, med, hi = min(v), sorted(v)[all_m//2], max(v)
 print(f"{lo:.1f} {med:.1f} {hi:.1f} {slope:+.2f}")
 # In thêm nguyên đường mẫu. Theo quy tắc trong BUGS.md, phải nhìn cả chuỗi mốc
 # theo thời gian mới phân biệt được "rò rỉ" với "LRU nhả-giữ" — chỉ một con số
@@ -263,8 +277,7 @@ sleep 60
 c2=$(cpu_seconds "$pid"); w2=$(python3 -c 'import time;print(time.time())')
 cpu_idle=$(python3 -c "print(f'{100*($c2-$c1)/max(0.001,$w2-$w1):.3f}')" 2>/dev/null || echo "-")
 
-threads=$(ps -M "$pid" 2>/dev/null | wc -l | tr -d ' ')
-[ "$threads" = "1" ] && threads="-"
+threads=$(ps -M "$pid" 2>/dev/null | awk 'NR>1{c++} END{print (c>0 ? c : "-")}')
 wins=$(count_windows)
 
 # --- GPU: can root cho powermetrics. Khong co thi noi ro, khong doan. ---
@@ -337,30 +350,26 @@ print(f"{'metric':30}{'moc':>10}{'hien tai':>12}{'chenh %':>10}")
 for k in b:
     if k not in n: continue
     old, cur = b[k], n[k]
-    pct = 100 * (cur - old) / old if old else 0
-    # Nguong RIENG cho tung moc, dat theo nhieu do duoc — khong phai mot con so
-    # chung cho ca bang.
-    #
-    # Lý do: 15% chi co y nghia khi phep do lap lai duoc. Da do:
-    #   - ram_footprint_mb_median: cung mot binary, hai lan chay lien tiep cho
-    #     15.8 roi 9.6 MB — chenh 39%, bien do 65%. Ly do la cache dia: lan
-    #     trung gap thi app doc ban thumbnail nho, lan trượt thi giai ma anh goc
-    #     4K, va bo giai ma ImageIO giu lai bo dem ~7 MB vinh vien (ghi ro ngay
-    #     trong `ImageStore.load`). Day khong phai loi cua app.
-    #   - launch_to_window_s: 14 mau trong mot phien cho 0.57 ... 0.88s. Voi
-    #     trung vi 5 lan, buoc do phan giai 0.05s van chua du de phan biet 0.5
-    #     voi 0.6.
-    #   - cpu_idle_pct: nhieu ~0, 15% la qua rong nhung cung rat an toan.
-    #
-    # Muon siet lai: sua TOL trong file nay — nhung nho doc phieu do ben canh.
     if k in GATE:
+        t = TOL.get(k, tol)
+        if k == "cpu_idle_pct" and old == 0:
+            # Moc cu la 0.000%, khong the chia ty le phan tram.
+            # Dung nguong tuyet doi: neu cur > 0.5% CPU luc nghi thi bao LOI.
+            abs_diff = cur - old
+            if cur > 0.5:
+                bad.append(k); mark = "LOI"
+            else:
+                mark = "OK"
+            print(f"{k:30}{old:>10.3f}{cur:>12.3f}{abs_diff:>+9.3f}%pt {mark} (nguong tuyet doi > 0.5%)")
+            continue
+
+        pct = 100 * (cur - old) / old if old else (100.0 if cur > 0 else 0.0)
         # Hai chiều, nhung khac nhau:
         #   NANG HON  -> loi that, phai chan.
         #   NHE HON   -> KHONG chan, vi giam la tin vui. Nhung "nhac" lon la
         #                thuong dau hien app da hong (khong tai anh nua, hay do
         #                sai khac) chu khong phai toi uu hoa — nen phai noi ra
         #                chu khong bo qua im lang.
-        t = TOL.get(k, tol)
         if pct > t:
             bad.append(k); mark = "LOI"
         elif pct < -t:
@@ -369,6 +378,7 @@ for k in b:
             mark = "OK"
         print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  {mark} (nguong {t:g}%)")
     else:
+        pct = 100 * (cur - old) / old if old else (100.0 if cur > 0 else 0.0)
         print(f"{k:30}{old:>10.1f}{cur:>12.1f}{pct:>+9.1f}%  (chi de doc)")
 print()
 if warn:

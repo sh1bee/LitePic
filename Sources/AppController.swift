@@ -62,7 +62,9 @@ final class AppController: NSObject, NSApplicationDelegate {
                             onNext: { [weak self] in self?.step(1) },
                             onPin: { [weak self] in self?.togglePin() })
         widget.wireDrop { [weak self] urls in self?.adoptDroppedFiles(urls) }
+        widget.onLevelChanged = { [weak self] in self?.rebuildMenu() }
         widget.setControlsVisible(false)
+        widget.setPinned(isPinned)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -312,8 +314,6 @@ final class AppController: NSObject, NSApplicationDelegate {
             // chính, và nhớ lại trong RAM cho lần xem sau.
             ImageStore.clearMemory()
             advance()
-            // Cửa sổ khác đang che widget? Tự nâng lên tầng nổi để bấm được.
-            if widget.autoLiftIfOccluded() { rebuildMenu() }
         }
     }
 
@@ -333,6 +333,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     @objc private func clearFolders() {
         settings.folderPaths = []
         images = []
+        lastIndex = -1
+        watcher.stop()
         timer?.invalidate()
         timer = nil
         // PHẢI dọn widget. Trước đây hàm này chỉ dọn phía "dữ liệu", nên tấm ảnh
@@ -415,25 +417,20 @@ final class AppController: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Bước tới ảnh kế tiếp/trước — có xét ảnh ghim.
+    /// Bước tới ảnh kế tiếp/trước.
+    ///
+    /// Nếu đang ghim ảnh mà người dùng chủ động bấm ‹ / ›, tự động bỏ ghim
+    /// để chuyển sang xem ảnh khác và không bị timer tự ý giật ngược về ảnh cũ.
     private func step(_ delta: Int) {
         guard !images.isEmpty else { return }
-        // pool các ảnh được phép hiện (bỏ ảnh đang ghim nếu còn ảnh khác)
-        var pool = images
-        if isPinned, images.count > 1 {
-            pool = images.filter { $0.path != settings.pinnedURL }
+        if isPinned {
+            settings.pinnedURL = nil
+            widget.setPinned(false)
         }
-        guard !pool.isEmpty else { return }
-        // `lastIndex` khởi tạo là -1 và cũng bị đặt lại khi quét lại thư mục.
-        // Nếu `images` đã có ảnh (quét xong) mà chưa hiện ảnh nào, bấm ‹ › sẽ
-        // vào thẳng `images[-1]` và CRASH. Phải chặn trước khi lấy phần tử.
-        let cur = images.indices.contains(lastIndex) ? images[lastIndex] : nil
-        let curInPool = cur.flatMap { pool.firstIndex(of: $0) } ?? 0
-        let next = ((curInPool + delta) % pool.count + pool.count) % pool.count
-        if let i = images.firstIndex(of: pool[next]) {
-            lastIndex = i
-            widget.show(images[i])
-        }
+        let cur = images.indices.contains(lastIndex) ? lastIndex : 0
+        let next = ((cur + delta) % images.count + images.count) % images.count
+        lastIndex = next
+        widget.show(images[next])
         rebuildMenu()
     }
 

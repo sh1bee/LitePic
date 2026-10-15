@@ -34,16 +34,36 @@ enum Diag {
     }
 
     /// Ghi trạng thái cửa sổ: tầng, có bị cửa sổ nào che không.
-    /// `occludedWindows` là nguồn chính xác của việc widget có nhận được click hay không.
+    /// Truy vấn danh sách cửa sổ toàn hệ thống qua CGWindowListCopyWindowInfo để thấy cả cửa sổ app khác.
     static func describe(_ w: NSWindow, _ tag: String) {
         guard enabled else { return }
         let desk = Int(CGWindowLevelForKey(.desktopWindow))
-        // Cửa sổ nào nằm trên widget (tầng cao hơn) và có cắt qua vùng của nó —
-        // chính là thứ chặn click. Chỉ nhìn `NSApp.windows` của chính app này
-        // không đủ: cửa sổ app khác không nằm trong danh sách đó.
-        let blockers = NSApp.windows
-            .filter { $0 !== w && $0.isVisible && $0.frame.intersects(w.frame) && $0.level > w.level }
-            .map { "\($0.title.isEmpty ? $0.className : $0.title)[\(Int($0.frame.width))x\(Int($0.frame.height))]" }
+        var blockers: [String] = []
+        let wid = CGWindowID(w.windowNumber)
+        if let list = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow, .excludeDesktopElements], wid) as? [[String: Any]],
+           let mainScreen = NSScreen.screens.first {
+            let screenHeight = mainScreen.frame.height
+            let appKitFrame = w.frame
+            let myPID = ProcessInfo.processInfo.processIdentifier
+
+            for info in list {
+                if let pid = info[kCGWindowOwnerPID as String] as? Int32, pid == myPID { continue }
+                if let alpha = info[kCGWindowAlpha as String] as? Double, alpha < 0.1 { continue }
+                guard let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                      let cgRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
+                guard cgRect.width > 20, cgRect.height > 20 else { continue }
+                let appKitRect = NSRect(x: cgRect.origin.x,
+                                        y: screenHeight - cgRect.origin.y - cgRect.height,
+                                        width: cgRect.width,
+                                        height: cgRect.height)
+                if appKitRect.intersects(appKitFrame) {
+                    let owner = info[kCGWindowOwnerName as String] as? String ?? "App"
+                    let name = info[kCGWindowName as String] as? String ?? ""
+                    let label = name.isEmpty ? owner : "\(owner):\(name)"
+                    blockers.append("\(label)[\(Int(cgRect.width))x\(Int(cgRect.height))]")
+                }
+            }
+        }
         log("""
             \(tag): frame=\(Int(w.frame.origin.x)),\(Int(w.frame.origin.y)) \
             \(Int(w.frame.width))x\(Int(w.frame.height)) level=desk+\(w.level.rawValue - desk) \

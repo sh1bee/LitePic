@@ -17,8 +17,13 @@ for f in Sources/*.swift; do
   SOURCES+=("$f")
 done
 
-echo "==> Bien dich bo test keo..."
-swiftc -O -swift-version 5 -o "$OUT/run" "${SOURCES[@]}" Tests/main.swift
+ARCH="$(uname -m)"
+MIN_MACOS="13.0"
+
+echo "==> Bien dich bo test keo ($ARCH-apple-macos$MIN_MACOS)..."
+swiftc -O -swift-version 5 \
+  -target "$ARCH-apple-macos$MIN_MACOS" \
+  -o "$OUT/run" "${SOURCES[@]}" Tests/main.swift
 
 echo "==> Chay..."
 "$OUT/run"

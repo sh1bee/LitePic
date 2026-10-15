@@ -19,8 +19,21 @@ Mỗi mục đều có **phép đo cụ thể đã chạy được**, không ph�
 | 10 | Tranh chấp luồng khi thư mục đổi | FSEvents trên luồng phụ |
 | 11 | Ảnh chụp dọc bị méo | EXIF `Orientation` bị bỏ qua |
 | 12 | Widget mờ 25% lúc chuyển ảnh | hai lớp cùng mờ |
+| 13 | Vòng lặp kéo kẹt khi mất mouseUp | watchdog thoát sau 5s |
+| 14 | "Bỏ thư mục" xong ảnh vẫn còn | `widget.clear()` |
+| 15 | Đua luồng trên đĩa cache | `decodeQueue` tuần tự hoá |
+| 16 | Rò rỉ observer token | lưu token để giải phóng |
+| 17 | Kẹt con trỏ bàn tay | dùng `resetCursorRects` |
+| 18 | RAM dao động 9.6 - 15.8 MB | cache giải mã ảnh 4K |
+| 19 | Lỗi công cụ đo hiệu năng | `bench.sh` |
+| 20 | Lỗi trong bộ kiểm thử | `test.sh` & `Tests/main.swift` |
+| 21 | Cụm nút điều khiển không bấm được | `.activeAlways` + `hitTest` |
+| 22 | Crossfade bị cắt hình tức thì | thứ tự lớp trong container |
+| 23 | Khung Polaroid cụt viền đáy | thiếu `frameBottom` |
+| 24 | Ghim ảnh bị xung đột khi chuyển ảnh | unpin tự nhiên trong `step` |
+| 25 | Tối ưu ImageStore & biên (edge cases) | decode nền, autoLift, clear dọn |
 
-Mục 6, 9 và 12 đều có **hai nguyên nhân chồng nhau** — sửa một chưa đủ.
+Mục 6, 9, 12, 19, 20 và 21 đều có **nhiều nguyên nhân chồng nhau** — sửa một chưa đủ.
 
 ---
 
@@ -617,4 +630,113 @@ Phép thử mới "xoá cache lúc đang giải mã" ban đầu trỏ thẳng v�
 
 Đã thêm `ImageStore.cacheDirOverride` để bộ test trỏ sang thư mục tạm. Nguyên tắc
 chung, đúng như mục 1: **bộ test không được để lại thay đổi ở thế giới thật.**
+
+---
+
+## 19. Các lỗi trong bộ công cụ đo hiệu năng (`bench.sh`) (đã sửa)
+
+**Triệu chứng & Nhận ra.**
+1. **CPU nghỉ nhảy vọt nhưng script vẫn báo OK**: Mốc `cpu_idle_pct=0.000` khiến công thức `pct = 100 * (cur - old) / old if old else 0` luôn ra `0.0%` do `old == 0` là `False`. Dù CPU lúc nghỉ tăng vọt lên 50% hay 100%, `bench.sh check` vẫn báo `OK`.
+2. **Không tắt được đổi ảnh ngẫu nhiên**: `SAVED_RANDOM="$(defaults read ...)"` trả về rỗng nếu người dùng chưa từng chỉnh tay (app chạy theo mặc định code là bật random 15-300s). Script kiểm tra `[ -n "$SAVED_RANDOM" ]` nên bỏ qua việc tắt đổi ảnh, khiến LRU nhả-giữ liên tục làm nhiễu phép đo RAM suốt 8 phút.
+3. **Cắt `flat_start` >= 95% peak che giấu rò rỉ bộ nhớ**: Nếu RAM tăng tuyến tính đều đặn (ví dụ 10 lên 20 MB qua 32 mẫu), điểm `>= peak * 0.95` rơi vào mẫu thứ 28. Thuật toán cắt bỏ 85% mẫu đầu và chỉ tính slope trên 4 mẫu cuối.
+4. **Đếm dư 1 luồng**: `ps -M "$pid" | wc -l` đếm cả dòng header của lệnh `ps`.
+5. **Lệch đường dẫn**: `build.sh` xuất ra `build/LitePic.app`, nhưng `bench.sh` ghim cứng `/Applications/LitePic.app`.
+
+**Cách sửa.**
+- Đối với `cpu_idle_pct` (hoặc khi `old == 0`), kiểm tra theo ngưỡng tuyệt đối (`cur > 0.5%`) thay vì chia tỷ lệ trên 0.
+- Luôn tắt randomInterval bằng cờ `MODIFIED_SETTINGS=1` và khôi phục/xoá bằng `defaults delete` nếu giá trị ban đầu là rỗng.
+- Tính `slope` trên toàn bộ tập mẫu sau 90s làm ấm thay vì cắt lấy lát cắt `>= 95%` peak.
+- Dùng `ps -M "$pid" 2>/dev/null | awk 'NR>1{c++} END{print (c>0 ? c : "-")}'`.
+- Tự động phát hiện nhị phân tại `build/LitePic.app` trước khi fallback sang `/Applications/LitePic.app`.
+
+---
+
+## 20. Các lỗi trong bộ kiểm thử (`test.sh` & `Tests/main.swift`) (đã sửa)
+
+**Triệu chứng & Nhận ra.**
+1. **Luôn trả về exit(0)**: `line(_ ok: Bool, ...)` chỉ in `✗` mà không đếm lỗi; cuối file gọi cứng `exit(0)`. Test hỏng vẫn báo CI thành công.
+2. **Làm bẩn cấu hình người dùng**: `Settings.shared.levelMode = .floating` ghi đè trực tiếp UserDefaults thật mà không phục hồi.
+3. **Thiếu cờ target macOS 13.0**: `test.sh` thiếu `-target "$ARCH-apple-macos13.0"`, không bắt được các lỗi gọi nhầm API macOS 14/15.
+4. **Crash tiềm ẩn & tính sai thời gian ở Test A**: `r.dropTime!.timeIntervalSince(Date())` vừa force-unwrap vừa trừ ngược thời gian, in ra `-0.01s`.
+5. **Lạm dụng Mirror + as!**: Truy cập `activeSlots`, `container`, `imageView`, `topView`, `overlay` qua chuỗi ký tự bằng Mirror; đổi tên thuộc tính trong `Sources/` là crash runtime.
+
+**Cách sửa.**
+- Thêm biến đếm `var failures = 0`, tăng khi `!ok` và gọi `exit(failures == 0 ? 0 : 1)`.
+- Lưu `savedLevelMode` trước khi test và khôi phục ở cuối file.
+- Thêm `-target "$ARCH-apple-macos13.0"` vào lệnh `swiftc` trong `test.sh`.
+- Lưu `armTime` trong `onArmed` và tính an toàn bằng `armTime?.timeIntervalSince(t0)`.
+- Chuyển các thuộc tính trong `WidgetWindow` thành `internal` và truy cập trực tiếp có kiểm tra kiểu biên dịch.
+
+---
+
+## 21. Cụm nút điều khiển (‹, ›, 📌) không hiện và không thể bấm được (đã sửa)
+
+**Triệu chứng.** Rê chuột vào widget các nút điều khiển không bao giờ hiện. Dù có ép hiện (`controls.isHidden = false`), bấm vào nút vẫn không phản hồi (vào vòng kéo như click lên ảnh).
+
+**Nhận ra — ba nguyên nhân chồng nhau:**
+1. **`NSTrackingArea` dùng cờ `.activeInKeyWindow` trên cửa sổ `.borderless`**: Cửa sổ không viền có `canBecomeKey == false` nên không bao giờ là keyWindow; `mouseEntered` và `mouseExited` không bao giờ được AppKit gọi.
+2. **`DraggableView.hitTest` luôn trả về `self`**: Toàn bộ điểm trong bounds đều trả về `self`, nuốt sạch click chuột của các subview `NSButton` bên trong `WidgetControls`.
+3. **Chưa quy đổi toạ độ trong `hitTest`**: Tham số `point` truyền vào nằm ở hệ toạ độ của `superview`, cần quy đổi bằng `convert(point, from: superview)`.
+
+**Cách sửa.**
+- Đổi `.activeInKeyWindow` thành `.activeAlways` trong `updateTrackingAreas()`.
+- Trong `DraggableView.hitTest(_:)`, quy đổi toạ độ và ưu tiên chuyển tiếp cho `WidgetControls.hitTest(local)` khi cụm nút đang hiển thị.
+
+---
+
+## 22. Hiệu ứng chuyển ảnh mềm (Crossfade) bị cắt hình tức thì (đã sửa)
+
+**Triệu chứng.** Khi đổi ảnh, ảnh mới giật lên tức thì thay vì mờ mềm mại trong 0.30s.
+
+**Nhận ra.** `container.addSubview(blank, positioned: .below, relativeTo: controls)` đặt lớp nhận ảnh mới `blank` nằm ngay dưới `controls`. Vì `controls` nằm trên cùng, lệnh này đã vô tình đưa `blank` (đang có `opacity = 1` tức thì) lên đè trên lớp ảnh cũ `shown`, che lấp animation mờ dần của `shown`.
+
+**Cách sửa.**
+Đặt `blank` nằm dưới `shown` ngay trước khi gán opacity và animation:
+```swift
+container.addSubview(blank, positioned: .below, relativeTo: shown)
+setContents(img, on: blank)
+blank.displayIfNeeded()
+setOpacity(blank, to: 1)
+fade(shown, to: 0)
+```
+
+---
+
+## 23. Khung Polaroid bị cắt cụt viền trắng dưới và lệch toạ độ lưới (đã sửa)
+
+**Triệu chứng.** Chọn khung Polaroid thì phần viền đáy dày đặc trưng (46pt) bị méo, mép dưới cửa sổ cắt ngang, còn đỉnh cửa sổ thừa một khoảng trống lớn. Kéo vào ô lưới bị lệch 46pt trên trục Y.
+
+**Nhận ra.** Trong `WidgetWindow.layout()`, toạ độ Y của `imageView.frame` chỉ đặt ở `y: i + p + room.height` mà quên cộng thêm `b = frameBottom` (46pt). Lớp trang trí trắng mở rộng xuống dưới `imageRect.minY - i - extraBottom` rơi xuống toạ độ âm ngoài đáy cửa sổ. Đồng thời `imageInset.y` cũng thiếu `frameBottom`.
+
+**Cách sửa.**
+- Trong `layout()`: Đặt `r.origin.y = i + p + b + room.height`.
+- Trong `imageInset`: Cộng thêm `frameBottom` vào trục Y: `frameInset + framePad + frameBottom + room.height`.
+
+---
+
+## 24. Lỗi logic khi vừa ghim ảnh (`isPinned`) vừa chuyển ảnh ‹ / › (đã sửa)
+
+**Triệu chứng.** Ghim ảnh B rồi bấm Next sang C: app nhảy cóc về đầu danh sách, sau vài chục giây timer tự động giật ngược về ảnh B. Nút ghim lúc mở app không sáng màu vàng dù đã có ảnh ghim từ phiên trước.
+
+**Nhận ra.**
+- `step()` lọc bỏ ảnh ghim khỏi `pool`, nên `pool.firstIndex(of: B)` trả về `nil` làm vị trí bị reset về 0.
+- `settings.pinnedURL` vẫn giữ B, nên nhịp timer kế tiếp gọi `advance()` thấy ảnh hiện tại khác B lại tự giật về B.
+- Lúc khởi động chưa gọi `widget.setPinned(isPinned)`.
+
+**Cách sửa.**
+- Gọi `widget.setPinned(isPinned)` trong `applicationDidFinishLaunching`.
+- Trong `step(_:)`, khi người dùng bấm chuyển ảnh, tự động huỷ ghim (`settings.pinnedURL = nil; widget.setPinned(false)`) và duyệt tuần tự trong `images`.
+
+---
+
+## 25. Tối ưu bộ nhớ ImageStore & các tinh chỉnh biên (Edge-cases) (đã sửa)
+
+**Chi tiết các điểm đã tối ưu:**
+1. **Tắt triệt để cache ImageIO**: Thêm `kCGImageSourceShouldCache: false` vào `CGImageSourceCreateWithURL` của cả `pixelSize(of:)` và `decodeThumbnail(of:maxPixel:)`.
+2. **Bọc `autoreleasepool` trên `decodeQueue`**: Toàn bộ tác vụ giải mã và thao tác file trên hàng đợi nền được bọc `autoreleasepool` để giải phóng ngay các đối tượng CoreGraphics/NSImage trung gian.
+3. **Giải mã cache đĩa trên luồng nền**: Thay thế `NSImage(contentsOf: file)` bằng `decodeThumbnail(of: file, maxPixel: pixel)` trên `decodeQueue`, tránh hiện tượng AppKit trì hoãn giải mã JPEG tới main thread và loại bỏ lần băm SHA256 trùng lặp.
+4. **Chống đua nạp ảnh bất đồng bộ (Out-of-order load)**: Tăng `showToken += 1` ngay đầu `show()` và trong `clear()` để lập tức vô hiệu hoá mọi lượt tải nền cũ. Truyền cờ `evenIfBusy` vào callback của `ImageStore.load()`.
+5. **Đồng bộ thời điểm `autoLiftIfOccluded()`**: Chỉ kiểm tra nâng tầng khi cửa sổ đã thực sự xuất hiện lên màn hình lần đầu (`if !settled` trong `applyImage()`), truy vấn hệ thống qua `CGWindowListCopyWindowInfo` và lọc bỏ các cửa sổ có `kCGWindowLayer != 0`.
+6. **Dọn dẹp triệt để trong `clearFolders()`**: Gọi `watcher.stop()`, đặt `lastIndex = -1` và gán `currentURL = nil` trong `widget.clear()`.
+
 

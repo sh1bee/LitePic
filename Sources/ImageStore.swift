@@ -97,7 +97,8 @@ enum ImageStore {
         if let hit = sizeMemo[k] { lock.unlock(); return hit }
         lock.unlock()
 
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+        let srcOpts = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, srcOpts),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
               let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
               let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
@@ -157,39 +158,53 @@ enum ImageStore {
     /// Trả ngay tức thì (không cần bố trí hẹn giờ) nếu ảnh còn trong RAM — đường
     /// này chiếm đa số lượt bấm nút Next/Previous.
     static func load(_ url: URL, maxPixel: CGFloat, completion: @escaping (NSImage?) -> Void) {
-        if let hit = inMemory(url, maxPixel: maxPixel) {
+        let b = bucket(for: max(64, maxPixel))
+        let key = "\(cacheKey(for: url))-\(b)"
+
+        lock.lock()
+        if let hit = memCache[key] {
+            memOrder.removeAll { $0 == key }
+            memOrder.append(key)
+            lock.unlock()
             completion(hit)
             return
         }
-        let key = "\(cacheKey(for: url))-\(bucket(for: max(64, maxPixel)))"
+        lock.unlock()
+
         let file = cacheDir.appendingPathComponent("\(key).jpg")
-        let pixel = bucket(for: max(64, maxPixel))
+        let pixel = b
 
         decodeQueue.async {
-            // Cache đĩa: JPEG nhỏ, giải mã nhanh. Không cần đụng ảnh gốc.
-            if let hit = NSImage(contentsOf: file) {
-                self.remember(key, hit)
-                DispatchQueue.main.async { completion(hit) }
-                return
+            autoreleasepool {
+                // Cache đĩa: JPEG nhỏ, giải mã 100% ngoài luồng chính bằng decodeThumbnail
+                // thay vì NSImage(contentsOf:) — NSImage(contentsOf:) trì hoãn việc giải mã
+                // tới lúc vẽ trên main thread và giữ cache ngầm của hệ thống.
+                if FileManager.default.fileExists(atPath: file.path),
+                   let cg = self.decodeThumbnail(of: file, maxPixel: CGFloat(pixel)) {
+                    let hit = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                    self.remember(key, hit)
+                    DispatchQueue.main.async { completion(hit) }
+                    return
+                }
+                // Lạnh: giải mã ảnh gốc — ở đây, không phải trên luồng chính.
+                //
+                // Đo được: mỗi lần giải mã ảnh gốc 4K làm tiến trình tăng ~7 MB
+                // và KHÔNG bao giờ xuống lại, dù ảnh đó sau đó bị bỏ khỏi RAM. Đó là
+                // bộ giải mã JPEG của ImageIO giữ lại bộ đệm giải mã đầy đủ
+                // (3840×2160×4 = 31.6 MB) cho lần đọc kế tiếp cùng file đó.
+                //
+                // `CACHE_RESOLVED_IMAGES` bật thì ImageIO cache lại ảnh đã giải mã
+                // theo đường dẫn — tức là giữ nguyên ảnh 4K trong RAM. Tắt hẳn:
+                // ta đã có cache riêng ở tầng trên, không cần ImageIO nhớ gì thêm.
+                guard let cg = self.decodeThumbnail(of: url, maxPixel: CGFloat(pixel)) else {
+                    DispatchQueue.main.async { completion(nil) }
+                    return
+                }
+                let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+                self.remember(key, img)
+                self.writeCache(cg, to: file)
+                DispatchQueue.main.async { completion(img) }
             }
-            // Lạnh: giải mã ảnh gốc — ở đây, không phải trên luồng chính.
-            //
-            // Đo được: mỗi lần giải mã ảnh gốc 4K làm tiến trình tăng ~7 MB
-            // và KHÔNG bao giờ xuống lại, dù ảnh đó sau đó bị bỏ khỏi RAM. Đó là
-            // bộ giải mã JPEG của ImageIO giữ lại bộ đệm giải mã đầy đủ
-            // (3840×2160×4 = 31.6 MB) cho lần đọc kế tiếp cùng file đó.
-            //
-            // `CACHE_RESOLVED_IMAGES` bật thì ImageIO cache lại ảnh đã giải mã
-            // theo đường dẫn — tức là giữ nguyên ảnh 4K trong RAM. Tắt hẳn:
-            // ta đã có cache riêng ở tầng trên, không cần ImageIO nhớ gì thêm.
-            guard let cg = self.decodeThumbnail(of: url, maxPixel: CGFloat(pixel)) else {
-                DispatchQueue.main.async { completion(nil) }
-                return
-            }
-            let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-            self.remember(key, img)
-            self.writeCache(cg, to: file)
-            DispatchQueue.main.async { completion(img) }
         }
     }
 
@@ -226,7 +241,8 @@ enum ImageStore {
             kCGImageSourceShouldCacheImmediately:        false,
             kCGImageSourceShouldCache:                   false,
         ]
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let srcOpts = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, srcOpts) else { return nil }
         return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
     }
 
@@ -271,7 +287,9 @@ enum ImageStore {
         // Cùng lý do như `clearCache()`: đây là thao tác **xoá file**, mà file
         // đó có thể đang được `writeCache` ghi trên `decodeQueue`. Đưa cùng một
         // hàng đợi nối tiếp thì không còn việc xoá nhầm file đang gửi.
-        decodeQueue.async { pruneCacheNow(keepPixels: pixels) }
+        decodeQueue.async {
+            autoreleasepool { pruneCacheNow(keepPixels: pixels) }
+        }
     }
 
     private static func pruneCacheNow(keepPixels pixels: Int?) {
@@ -326,9 +344,11 @@ enum ImageStore {
         // Bằng cách xếp hàng, việc dọn dẹp luôn nằm **sau** mọi việc giải mã
         // đang dở, không còn đường tranh chấp nào trên đĩa.
         decodeQueue.async {
-            try? FileManager.default.removeItem(at: cacheDir)
-            try? FileManager.default.createDirectory(at: cacheDir,
-                                                     withIntermediateDirectories: true)
+            autoreleasepool {
+                try? FileManager.default.removeItem(at: cacheDir)
+                try? FileManager.default.createDirectory(at: cacheDir,
+                                                         withIntermediateDirectories: true)
+            }
         }
     }
 }

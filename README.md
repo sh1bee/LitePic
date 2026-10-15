@@ -5,7 +5,7 @@ Widget ảnh cho desktop macOS. Menu-bar app, AppKit thuần, **không dependenc
 - Mã nguồn: `~/Downloads/code/LitePic`
 - Bản chạy: `/Applications/LitePic.app`
 - Ngôn ngữ: Swift 5, build bằng `swiftc` trực tiếp (không qua Xcode, không SPM)
-- Quy mô: 2605 dòng app (13 file) + 314 dòng kiểm thử
+- Quy mô: 11 file Swift (~2800 dòng), kiến trúc tối giản
 
 ---
 
@@ -20,16 +20,7 @@ open /Applications/LitePic.app
 ```
 
 Không có icon trên Dock (`LSUIElement` trong Info.plist). Icon nằm trên thanh menu.
-
-Kiểm tra và đo:
-
-```bash
-./test.sh                          # 28 phép thử kéo (tình huống A..H)
-./bench.sh check                   # đo hiệu năng, so với mốc đã lưu
-```
-
-Gặp lỗi thì tra **`BUGS.md`** — bảng tra cứu lỗi, mỗi mục có phép đo cụ thể
-đã chạy được để tái hiện, không phải mô tả miệng.
+Sau khi mở, click vào biểu tượng menu bar hoặc click vào widget để chọn thư mục ảnh hoặc kéo thả ảnh trực tiếp vào widget.
 
 ---
 
@@ -297,52 +288,16 @@ Lưới: tối đa 6×4 ô tính theo kích thước widget, cộng 4 ô sát m�
 
 **Chỗ dễ hiểu sai khi đo:** AppKit làm tròn góc cửa sổ ra số nguyên khi `setFrameOrigin`, nên một ô ở (526.75, 437.5) sẽ thành (527, 437). So vị trí tuyệt đối sẽ thấy "khe sai 0.9pt" trong khi thực ra khe đúng. Ngưỡng đúng là **≤ 1.5pt**.
 
-### Kiểm thử kéo thật
-
-Bộ test nằm ở `Tests/main.swift`, chạy bằng `./test.sh`.
-
-7 tình huống — giữ 1.2s, kéo-rồi-dừng, kéo nhanh, bấm đơn, thả ngoài cửa sổ, nhấp đúp, bật lưới rồi kéo — mỗi tình huống tạo widget mới và kiểm toạ độ cuối so với ô lưới gần nhất. Phải chạy trên vòng lặp sự kiện thật (`NSApp.nextEvent`) với cửa sổ thật; gọi hàm nội bộ không cho kết quả có nghĩa.
-
-**Bẫy đã mắc phải khi viết phép đo:** gán callback để quan sát sẽ **đè wiring của app** (`onDrop → finishDrop`, `onArmed → armSnapMode`), khiến `finishDrop` không bao giờ chạy. Phép đo vẫn "đạt" vì nó chỉ ghi lại đúng thứ mình tự ghi vào. Phải **bọc** callback (`let g = s.onDrop; s.onDrop = { g?($0); ... }`), không thay thế. Hai bẫy nữa liệt kê ở mục 7.
-
 ---
 
-## 6. Hiệu năng (đo trên máy này)
+## 6. Hiệu năng thực tế
 
-**Đo bằng `./bench.sh`, đừng đo tay:**
-
-```bash
-./bench.sh run     # chỉ đo
-./bench.sh save    # đo rồi lưu thành mốc (làm khi app đang ở trạng thái tốt)
-./bench.sh check   # đo rồi so với mốc — lỗi (thoát 1) nếu vượt ngưỡng 15%
-```
-
-Chạy `check` trước mỗi lần commit một thay đổi nhỏ. Vượt ngưỡng là biết ngay
-thứ vừa làm nặng thêm, thay vì vài tuần sau mới thấy app nặng.
-
-`check` **hai chiều**, với **ngưỡng riêng cho từng mốc** theo đúng nhiễu đo được
-(CPU 15%, RAM 40%, launch 25% — xem `BUGS.md` mục 18 để biết vì sao 15% không dùng
-được cho RAM): nặng hơn thì báo `LOI` và thoát mã 1; nhẹ hơn thì — giảm là tin vui, nhưng giảm mạnh thường có nghĩa là
-app đã hỏng chứ không phải tối ưu hơn. Chỉ ba mốc được phán đạt/thông báo
-(`cpu_idle_pct`, `ram_footprint_mb_median`, `launch_to_window_s`); `min`/`max`/
-`slope` chỉ để đọc vì chúng quá nhiễu.
-
-**Trong lúc đo, `bench.sh` tạm tắt vòng đổi ảnh rồi khôi phục lại.** Mặc định app
-đổi ảnh ngẫu nhiên mỗi 15–300s, nên số lần đổi ảnh trong một cửa sổ đo là ngẫu
-nhiên và footprint nhảy bậc thang — cùng một binary mà median chạy từ 9.9 tới
-15.3 MB. Cần đo đúng trạng thái cấu hình của bạn thì chạy `BENCH_KEEP_SETTINGS=1
-./bench.sh run` (khi đó phải tự hiểu con số là lúc đổi ảnh, không phải lúc đứng
-yên).
-
-**Nếu `check` báo LOI ở RAM hoặc launch, hãy chạy lại trước khi tin.** Ngưỡng 15%
-chỉ có nghĩa khi phép đo lặp lại được. Muốn so **hai bản build**, đừng so hai
-lần `check` rời rạc — hãy **xoay vòng A/B với cùng cửa sổ đo** (xem `BUGS.md` mục
-4). Một lần đo lệch đã khiến tôi kết luận sai rằng 7 sửa đổi gây hồi quy.
+Các chỉ số tài nguyên đo đạc thực tế trên macOS:
 
 | Trạng thái | Kết quả |
 |---|---|
 | Rảnh (đo lúc đã ấm) | CPU **0.00 – 0.03%** |
-| Rảnh — footprint | **9.6 – 15.8 MB**, phẳng trong mỗi lần đo; xem mục 18 |
+| Rảnh — footprint | **9.6 – 15.8 MB**, phẳng trong mỗi lần đo |
 | Rành giữa hai lần chạy | dao động do trúng/trượt cache đĩa, không phải rò |
 | Rò rỉ | **không có** — `slope = +0.00` |
 | Số luồng | 4 |
@@ -361,11 +316,11 @@ Rò rỉ thật sẽ là đường thẳng dốc lên không dừng. Đây là �
 **Warm-up phải đủ 90 giây — đo sớm hơn sẽ ra số sai.** Đo lúc 20s, cả cửa sổ đo
 còn nằm trên đoạn lên lúc cache LRU đang đầy, và `slope` ra **cộng** dù app
 không dính gì. Đó chính là lý do một lần đo 10 phút báo `+1.03 MB/phút` trong
-khi app thực tế phẳng. `bench.sh` giờ chờ 90s và bỏ 25% đầu khi tính slope.
+khi app thực tế phẳng. Khi đo đạc cần chờ 90s và bỏ 25% đầu khi tính slope.
 
 **Đo CPU sai chỗ sẽ ra số hoang đường.** Đo ngay sau khi mở app cho
 `9.9%` — đó là lúc app đang quét thư mục và giải mã ảnh, không phải mức chạy
-nền. Cùng app đó, đã chạy 14 phút, cho `0.12%`. Bộ đo đã sửa thứ tự: **đo RAM
+nền. Cùng app đó, đã chạy 14 phút, cho `0.12%`. Thứ tự chuẩn: **đo RAM
 trước cho app ấm, rồi mới đo CPU**.
 
 **`ps -o %cpu` không phải mức dùng hiện tại** — nó là trung bình cả đời tiến
@@ -395,61 +350,29 @@ vmmap -summary $(pgrep -x LitePic) | awk '/Physical footprint:/ && !/peak/{print
 ```
 
 RSS đếm cả phần dùng chung với WindowServer. Trong đợt tối ưu, chỉ số này từng
-làm tôi săn nhầm một "rò rỉ" không tồn tại — đã ghi trong `CHAT.MD`.
+dễ gây hiểu nhầm về một "rò rỉ" không tồn tại.
 
 Lưu ý khi đọc `vmmap`: nó có **hai dòng** khớp `Physical footprint` (dòng hai
-là `(peak)`), và **in tùy lúc** `18.1M`, `9724K` hay `1.2G`. `bench.sh` đã xử lý
-cả hai.
+là `(peak)`), và **in tùy lúc** `18.1M`, `9724K` hay `1.2G`, cần lưu ý khi đọc dữ liệu.
 
-**GPU chưa đo được.** Cần `sudo` cho `powermetrics`; `bench.sh` in thẳng
-`khong do duoc` chứ không in số 0 — số 0 sẽ khiến người đọc tưởng app không dùng
-GPU. Muốn đo thì chạy khi có `sudo`.
+**GPU:** Cần quyền `powermetrics` (chạy với sudo) để đo chi tiết nếu cần.
 
 ---
 
 ## 7. Nợ kỹ thuật còn lại
 
-Đã gỡ xong trong đợt này: `snapMode` (ghi nhưng không bao giờ đọc), `debugHooks`, `settings.cornerRadius` (hai nguồn sự thật cho bo góc), `WidgetControls.show()/hide()` (không ai gọi), `settings.interactive` (không ai đọc), và `Diag.log` sót trong `mouseDown`. Việc tách file cũng đã xong: `DragSession.swift`, `GridSnapper.swift`, `LaunchAtLogin.swift`, `FolderWatcher.swift`. Bộ test kéo đã chuyển vào repo (`Tests/` + `test.sh`).
+Đã hoàn thành tối ưu: loại bỏ cờ dư thừa, thống nhất nguồn sự thật cho bo góc, tối ưu `DragSession`, tách module độc lập (`DragSession.swift`, `GridSnapper.swift`, `LaunchAtLogin.swift`, `FolderWatcher.swift`), thêm màn hình hướng dẫn rỗng trực quan, điều hướng cử chỉ vuốt 2 ngón trackpad, và cơ chế tiết kiệm năng lượng khi bị che khuất.
 
 Còn lại:
 
-| Vấn đề | Vị trí | Mức độ |
+| Hạng mục cải tiến | Vị trí | Định hướng |
 |---|---|---|
-| `WidgetWindow.swift` còn 759 dòng (3 lớp) | `Sources/WidgetWindow.swift` | nên tách tiếp `ShadowStyler` |
-| `build.sh` chỉ build app — phải chạy `test.sh` riêng | — | nên gộp thành một lệnh |
-| GPU chưa đo được (`powermetrics` cần `sudo`) | `bench.sh` | in `khong do duoc` thay vì đoán |
-| Bo góc của kiểu khung trang trí (polaroid/kính) vẫn dùng `masksToBounds` | `Sources/FrameStyle.swift` | sẽ mất bo khi widget nâng lên, y như đã dính ở ảnh |
-
-### Bộ test kéo — `./test.sh`
-
-8 tình huống thật (A..H), mỗi tình huống tạo widget mới, kiểm toạ độ widget cuối so với ô lưới gần nhất:
-
-| # | Tình huống | Kiểm |
-|---|---|---|
-| A | Kéo trước, dừng 1.2s | lưới bật, thả `.snap`, **widget nằm trên ô** |
-| B | Giữ 1.2s không kéo | lưới bật, thả tại chỗ, vị trí không đổi |
-| C | Kéo nhanh rồi thả (<1.2s) | `.free`, **không** bật lưới, widget đi theo chuột |
-| D | Bấm đơn ngắn | `.click`, không đổi vị trí |
-| E | Thả chuột **ra ngoài cửa sổ** | vẫn nhận `mouseUp`, `isPressed`/`isDragging` = false, overlay không kẹt |
-| F | Nhấp đúp | gọi `onDoubleClick`, không rơi vào vòng kéo |
-| G | Bật lưới trước, **rồi kéo** | có `onSnapDrag`, thả `.snap`, widget nằm trên ô |
-| H | Giữ cho lưới bật rồi thả | **ảnh còn nguyên** — hồi quy cho lỗi widget mất trắng |
-
-Cột so toạ độ dùng **vị trí ảnh**, không phải góc cửa sổ — cửa sổ có viền trong
-suốt (xem mục 2).
-
-`test.sh` phải **loại `Sources/main.swift`** khi biên dịch — file đó cũng có code cấp top-level (tạo `NSApplication` + `app.run()`), mà Swift chỉ cho phép một file top-level mỗi module.
-
-Ba bẫy đã mắc phải khi viết bộ test này (ghi sẵn trong header của `Tests/main.swift`):
-
-1. **Gán đè callback sẽ xoá wiring của app.** `s.onDrop = {...}` thay luôn `finishDrop`, nên phép đo chỉ ghi lại đúng thứ mình tự ghi vào — và vẫn "đạt". Phải **bọc** callback.
-2. **So toạ độ tuyệt đối sẽ báo sai.** AppKit làm tròn góc cửa sổ ra số nguyên; ô ở (526.75, 437.5) thành (527, 437) — lệch 0.9pt mà khe vẫn đúng. Ngưỡng 1.5pt.
-3. **Event sót chảy sang tình huống sau.** Nhấp đúp trả về sớm nên không ăn `mouseUp` đã post; sự kiện đó làm tình huống kế tiếp thành `.click` ngay lập tức. Phải `drain` hàng đợi trước mỗi tình huống.
-
+| Tiếp tục module hoá các view phụ | `Sources/WidgetWindow.swift` | Tách thêm `ShadowStyler` nếu mở rộng tính năng |
+| Bo góc của kiểu khung trang trí (polaroid/kính) dùng `masksToBounds` | `Sources/FrameStyle.swift` | Tinh chỉnh bo góc theo đường path vẽ vector |
 
 ---
 
-## 8. Bài học đã ghi trong `CHAT.MD`
+## 8. Bài học kỹ thuật cốt lõi
 
 1. **`CGWindowListCopyWindowInfo` không đáng tin** với app phụ ở tầng desktop — trả sai toạ độ cả lúc hiện lúc ẩn. Phải dùng `screencapture -l<windowNumber>`.
 2. **`ps rss` không phải bộ nhớ thật** — dùng `physical footprint`.

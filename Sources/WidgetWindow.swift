@@ -7,6 +7,34 @@ enum DropResult {
     case snap   // giữ đủ lâu rồi kéo/thả: khe vào lưới
 }
 
+/// 4 góc của widget để người dùng kéo thay đổi kích thước tự do.
+enum ResizeCorner {
+    case topLeft
+    case topRight
+    case bottomLeft
+    case bottomRight
+}
+
+extension NSCursor {
+    static var nwseResizeCursor: NSCursor {
+        let sel = Selector(("_windowResizeNorthWestSouthEastCursor"))
+        if NSCursor.responds(to: sel),
+           let cursor = NSCursor.perform(sel)?.takeUnretainedValue() as? NSCursor {
+            return cursor
+        }
+        return .crosshair
+    }
+
+    static var neswResizeCursor: NSCursor {
+        let sel = Selector(("_windowResizeNorthEastSouthWestCursor"))
+        if NSCursor.responds(to: sel),
+           let cursor = NSCursor.perform(sel)?.takeUnretainedValue() as? NSCursor {
+            return cursor
+        }
+        return .crosshair
+    }
+}
+
 /// View phủ kín cửa sổ widget: nhận chuột để kéo, chuột phải để mở menu,
 /// rê chuột để hiện nút, và nhận file thả từ Finder.
 ///
@@ -23,6 +51,16 @@ final class DraggableView: NSView {
     var onSwipeNext: (() -> Void)?
     var onSwipePrev: (() -> Void)?
 
+    /// Resize handling
+    var cornerAtPoint: ((NSPoint) -> ResizeCorner?)?
+    var cornerCursorRects: (() -> [(NSRect, NSCursor)])?
+    var onBeginResize: ((ResizeCorner, NSEvent) -> Void)?
+    private(set) var isResizing = false
+
+    func setResizing(_ r: Bool) {
+        isResizing = r
+    }
+
     private var scrollDelta: CGFloat = 0
     private var lastSwipeTime: TimeInterval = 0
 
@@ -37,10 +75,13 @@ final class DraggableView: NSView {
     /// Mấu chốt để kéo hoạt động: `ImageCanvas` phủ kín toàn bộ cửa sổ, nên mặc
     /// định hit-test trả về chính imageView và các sự kiện chuột không bao giờ
     /// tới `DraggableView`. Mọi điểm trong biên đều trả về `self`, trừ khi bấm
-    /// trúng cụm nút `WidgetControls` đang hiển thị.
+    /// trúng cụm nút `WidgetControls` đang hiển thị hoặc bấm trúng góc để resize.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard bounds.contains(local) else { return nil }
+        if cornerAtPoint?(local) != nil {
+            return self
+        }
         if let c = subviews.first(where: { $0 is WidgetControls }),
            !c.isHidden,
            let hit = c.hitTest(local) {
@@ -50,6 +91,11 @@ final class DraggableView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        if let corner = cornerAtPoint?(local) {
+            onBeginResize?(corner, event)
+            return
+        }
         session.begin(in: self, event: event)
     }
 
@@ -140,7 +186,7 @@ final class DraggableView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let t = tracking { removeTrackingArea(t) }
-        var opts: NSTrackingArea.Options = [.activeAlways, .mouseEnteredAndExited, .inVisibleRect]
+        var opts: NSTrackingArea.Options = [.activeAlways, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect]
         if let w = window {
             let mouseInWindow = w.mouseLocationOutsideOfEventStream
             if bounds.contains(convert(mouseInWindow, from: nil)) {
@@ -156,24 +202,39 @@ final class DraggableView: NSView {
         onHover?(true)
     }
 
-    override func mouseExited(with event: NSEvent) {
-        onHover?(false)
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        guard !isPressed, !isDragging, !isResizing else { return }
+        let local = convert(event.locationInWindow, from: nil)
+        if let corner = cornerAtPoint?(local) {
+            switch corner {
+            case .topLeft, .bottomRight:
+                NSCursor.nwseResizeCursor.set()
+            case .topRight, .bottomLeft:
+                NSCursor.neswResizeCursor.set()
+            }
+        } else {
+            NSCursor.pointingHand.set()
+        }
     }
 
-    /// Con trỏ trỏ tay do AppKit quản lý, **không** tự `push()`/`pop()`.
-    ///
-    /// Trước đây hàm này `NSCursor.pointingHand.push()` khi rê vào và `pop()` khi
-    /// rê ra. Ngăn xếp con trỏ của macOS là **toàn cục cho cả máy**: lệch một
-    /// lần là toàn bộ con trỏ trên máy còn kẹt — kể cả khi trỏ vào Desktop.
-    ///
-    /// Còn nữa, `mouseExited` **có thể bị rớt**: khi cửa sổ trượt dưới con trỏ
-    /// đang đứng yên, AppKit sinh cặp entered/exited, và nếu một phía bị mất
-    /// thì stack lệch. `addCursorRect` không có đường nào để lệch: AppKit tự
-    /// trả con trỏ về nguyên trạng khi ra khỏi `bounds`.
+    override func mouseExited(with event: NSEvent) {
+        onHover?(false)
+        if !isResizing {
+            NSCursor.arrow.set()
+        }
+    }
+
+    /// Con trỏ trỏ tay và con trỏ resize 4 góc do AppKit quản lý.
     override func resetCursorRects() {
         super.resetCursorRects()
-        guard !isPressed, !isDragging else { return }
+        guard !isPressed, !isDragging, !isResizing else { return }
         addCursorRect(bounds, cursor: .pointingHand)
+        if let rects = cornerCursorRects?() {
+            for (r, cursor) in rects {
+                addCursorRect(r, cursor: cursor)
+            }
+        }
     }
 }
 
@@ -323,6 +384,14 @@ final class ImageCanvas: NSView {
     var fill = false { didSet { needsDisplay = true } }
     /// Bán kính bo góc, vẽ tay trong `draw(_:)`.
     var cornerRadius: CGFloat = 0 { didSet { needsDisplay = true } }
+
+    override var frame: NSRect {
+        didSet {
+            if frame.size != oldValue.size {
+                needsDisplay = true
+            }
+        }
+    }
 
     override var isFlipped: Bool { true }
 
@@ -489,8 +558,9 @@ final class WidgetWindow {
 
     /// Đang giữ chuột hoặc đang kéo — AppController hoãn đổi ảnh lúc này để
     /// cửa sổ không bị giật khỏi tay người dùng.
-    var busy: Bool { container.isPressed || container.isDragging }
+    var busy: Bool { container.isPressed || container.isDragging || container.isResizing }
     var onLevelChanged: (() -> Void)?
+    var onSizeChanged: (() -> Void)?
 
     init() {
         let view = DraggableView(frame: NSRect(x: 0, y: 0, width: 440, height: 340))
@@ -563,6 +633,16 @@ final class WidgetWindow {
             }
         }
         view.registerForDraggedTypes([.fileURL])
+
+        view.cornerAtPoint = { [weak self] p in
+            self?.corner(at: p)
+        }
+        view.cornerCursorRects = { [weak self] in
+            self?.cornerCursorRects() ?? []
+        }
+        view.onBeginResize = { [weak self] corner, event in
+            self?.performResize(corner: corner, initialEvent: event)
+        }
 
         applyAppearance()
         overlay.setLevel(activeLevel)
@@ -1199,6 +1279,199 @@ private var imageOrigin: NSPoint {
                 onEmptyStateClick?()
             }
         }
+    }
+
+    // MARK: - Thay đổi kích thước (Resize)
+
+    var visualWidgetRect: NSRect {
+        let r = isEmptyState ? emptyView.frame : targetImageRect
+        return NSRect(
+            x: r.minX - frameInset,
+            y: r.minY - frameInset - frameBottom,
+            width: r.width + frameInset * 2,
+            height: r.height + frameInset * 2 + frameBottom
+        )
+    }
+
+    func corner(at point: NSPoint) -> ResizeCorner? {
+        let R = visualWidgetRect
+        guard R.width > 40, R.height > 40 else { return nil }
+
+        // Nếu chuột đang nằm trong các nút điều khiển thì nhường cho nút
+        if !controls.isHidden, controls.frame.contains(point) {
+            return nil
+        }
+
+        let d = min(24, min(R.width, R.height) / 3)
+        let bl = NSRect(x: R.minX - 6, y: R.minY - 6, width: d + 6, height: d + 6)
+        if bl.contains(point) { return .bottomLeft }
+
+        let br = NSRect(x: R.maxX - d, y: R.minY - 6, width: d + 6, height: d + 6)
+        if br.contains(point) { return .bottomRight }
+
+        let tl = NSRect(x: R.minX - 6, y: R.maxY - d, width: d + 6, height: d + 6)
+        if tl.contains(point) { return .topLeft }
+
+        let tr = NSRect(x: R.maxX - d, y: R.maxY - d, width: d + 6, height: d + 6)
+        if tr.contains(point) { return .topRight }
+
+        return nil
+    }
+
+    func cornerCursorRects() -> [(NSRect, NSCursor)] {
+        let R = visualWidgetRect
+        guard R.width > 40, R.height > 40 else { return [] }
+        let d = min(24, min(R.width, R.height) / 3)
+
+        let bl = NSRect(x: R.minX - 6, y: R.minY - 6, width: d + 6, height: d + 6)
+        let br = NSRect(x: R.maxX - d, y: R.minY - 6, width: d + 6, height: d + 6)
+        let tl = NSRect(x: R.minX - 6, y: R.maxY - d, width: d + 6, height: d + 6)
+        let tr = NSRect(x: R.maxX - d, y: R.maxY - d, width: d + 6, height: d + 6)
+
+        return [
+            (bl, .neswResizeCursor),
+            (tr, .neswResizeCursor),
+            (br, .nwseResizeCursor),
+            (tl, .nwseResizeCursor),
+        ]
+    }
+
+    func performResize(corner: ResizeCorner, initialEvent: NSEvent) {
+        container.setResizing(true)
+        defer {
+            container.setResizing(false)
+            window.invalidateCursorRects(for: container)
+            NSCursor.pointingHand.set()
+        }
+
+        let resizeCursor: NSCursor = (corner == .topLeft || corner == .bottomRight)
+            ? .nwseResizeCursor : .neswResizeCursor
+        resizeCursor.set()
+
+        let startMouse = NSEvent.mouseLocation
+        let startImageSize = imageSize
+        let startOrigin = window.frame.origin
+        let startWindowSize = window.frame.size
+        let aspect = max(0.01, startImageSize.width / max(1, startImageSize.height))
+
+        let anchor: NSPoint
+        switch corner {
+        case .bottomRight:
+            anchor = NSPoint(x: startOrigin.x, y: startOrigin.y + startWindowSize.height)
+        case .bottomLeft:
+            anchor = NSPoint(x: startOrigin.x + startWindowSize.width, y: startOrigin.y + startWindowSize.height)
+        case .topLeft:
+            anchor = NSPoint(x: startOrigin.x + startWindowSize.width, y: startOrigin.y)
+        case .topRight:
+            anchor = NSPoint(x: startOrigin.x, y: startOrigin.y)
+        }
+
+        while true {
+            guard let ev = NSApp.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp, .appKitDefined],
+                until: .distantFuture,
+                inMode: .eventTracking,
+                dequeue: true
+            ) else { continue }
+
+            if ev.type == .leftMouseUp {
+                break
+            }
+
+            if ev.type == .leftMouseDragged {
+                resizeCursor.set()
+                let currentMouse = NSEvent.mouseLocation
+                let dx = currentMouse.x - startMouse.x
+                let dy = currentMouse.y - startMouse.y
+
+                let deltaW: CGFloat
+                let deltaH: CGFloat
+                switch corner {
+                case .bottomRight:
+                    deltaW = dx
+                    deltaH = -dy
+                case .topRight:
+                    deltaW = dx
+                    deltaH = dy
+                case .bottomLeft:
+                    deltaW = -dx
+                    deltaH = -dy
+                case .topLeft:
+                    deltaW = -dx
+                    deltaH = dy
+                }
+
+                let shiftPressed = ev.modifierFlags.contains(.shift)
+                let lockAspect = (settings.sizeMode != .fixed) ? !shiftPressed : shiftPressed
+
+                var newW: CGFloat
+                var newH: CGFloat
+
+                if lockAspect {
+                    let delta = (deltaW + deltaH * aspect) / 2.0
+                    newW = max(120, startImageSize.width + delta)
+                    newH = (newW / aspect).rounded()
+                    if newH < 90 {
+                        newH = 90
+                        newW = (newH * aspect).rounded()
+                    }
+                } else {
+                    newW = max(120, startImageSize.width + deltaW)
+                    newH = max(90, startImageSize.height + deltaH)
+                }
+
+                newW = min(2400, newW)
+                newH = min(2400, newH)
+
+                imageSize = NSSize(width: newW, height: newH)
+                layout()
+
+                let newWindowSize = window.frame.size
+                let newOrigin: NSPoint
+                switch corner {
+                case .bottomRight:
+                    newOrigin = NSPoint(x: anchor.x, y: anchor.y - newWindowSize.height)
+                case .bottomLeft:
+                    newOrigin = NSPoint(x: anchor.x - newWindowSize.width, y: anchor.y - newWindowSize.height)
+                case .topLeft:
+                    newOrigin = NSPoint(x: anchor.x - newWindowSize.width, y: anchor.y)
+                case .topRight:
+                    newOrigin = NSPoint(x: anchor.x, y: anchor.y)
+                }
+                window.setFrameOrigin(newOrigin)
+            }
+        }
+
+        window.setFrameOrigin(clampToVisibleScreen(window.frame.origin))
+        settings.savedOrigin = window.frame.origin
+
+        switch settings.sizeMode {
+        case .fitImage:
+            settings.maxEdge = max(imageSize.width, imageSize.height)
+        case .fitWidth:
+            settings.width = imageSize.width
+        case .fixed:
+            settings.width = imageSize.width
+            settings.height = imageSize.height
+        }
+
+        if settings.sizeMode != .fixed && abs(imageSize.width / max(1, imageSize.height) - aspect) > 0.05 {
+            settings.sizeMode = .fixed
+            settings.width = imageSize.width
+            settings.height = imageSize.height
+        }
+
+        if let url = currentURL {
+            let pixel = displayMaxPixel
+            ImageStore.load(url, maxPixel: pixel, userInitiated: true) { [weak self] img in
+                guard let self, let img, self.currentURL == url else { return }
+                self.currentImage = img
+                let active = (self.topView.layer?.opacity ?? 0) > 0.5 ? self.topView : self.imageView
+                self.setContents(img, on: active)
+            }
+        }
+
+        onSizeChanged?()
     }
 
     // MARK: - Vị trí

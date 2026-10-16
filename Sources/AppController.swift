@@ -66,6 +66,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                             onPin: { [weak self] in self?.togglePin() })
         widget.wireDrop { [weak self] urls in self?.adoptDroppedFiles(urls) }
         widget.onLevelChanged = { [weak self] in self?.rebuildMenu() }
+        widget.onSizeChanged = { [weak self] in self?.rebuildMenu() }
         widget.setControlsVisible(false)
         widget.setPinned(isPinned)
     }

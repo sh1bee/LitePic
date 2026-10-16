@@ -16,23 +16,23 @@ enum ResizeCorner {
 }
 
 extension NSCursor {
-    static var nwseResizeCursor: NSCursor {
+    static let nwseResizeCursor: NSCursor = {
         let sel = Selector(("_windowResizeNorthWestSouthEastCursor"))
         if NSCursor.responds(to: sel),
            let cursor = NSCursor.perform(sel)?.takeUnretainedValue() as? NSCursor {
             return cursor
         }
         return .crosshair
-    }
+    }()
 
-    static var neswResizeCursor: NSCursor {
+    static let neswResizeCursor: NSCursor = {
         let sel = Selector(("_windowResizeNorthEastSouthWestCursor"))
         if NSCursor.responds(to: sel),
            let cursor = NSCursor.perform(sel)?.takeUnretainedValue() as? NSCursor {
             return cursor
         }
         return .crosshair
-    }
+    }()
 }
 
 /// View phủ kín cửa sổ widget: nhận chuột để kéo, chuột phải để mở menu,
@@ -198,30 +198,57 @@ final class DraggableView: NSView {
         tracking = area
     }
 
+    enum CursorKind {
+        case arrow
+        case pointingHand
+        case nwse
+        case nesw
+    }
+    var currentCursorKind: CursorKind = .arrow
+
+    private func updateCursor(for locationInWindow: NSPoint) {
+        guard !isPressed, !isDragging, !isResizing else { return }
+        let local = convert(locationInWindow, from: nil)
+        let nextKind: CursorKind
+        let nextCursor: NSCursor
+
+        if let corner = cornerAtPoint?(local) {
+            switch corner {
+            case .topLeft, .bottomRight:
+                nextKind = .nwse
+                nextCursor = NSCursor.nwseResizeCursor
+            case .topRight, .bottomLeft:
+                nextKind = .nesw
+                nextCursor = NSCursor.neswResizeCursor
+            }
+        } else {
+            nextKind = .pointingHand
+            nextCursor = .pointingHand
+        }
+
+        if currentCursorKind != nextKind {
+            currentCursorKind = nextKind
+            nextCursor.set()
+        }
+    }
+
     override func mouseEntered(with event: NSEvent) {
         onHover?(true)
+        updateCursor(for: event.locationInWindow)
     }
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        guard !isPressed, !isDragging, !isResizing else { return }
-        let local = convert(event.locationInWindow, from: nil)
-        if let corner = cornerAtPoint?(local) {
-            switch corner {
-            case .topLeft, .bottomRight:
-                NSCursor.nwseResizeCursor.set()
-            case .topRight, .bottomLeft:
-                NSCursor.neswResizeCursor.set()
-            }
-        } else {
-            NSCursor.pointingHand.set()
-        }
+        updateCursor(for: event.locationInWindow)
     }
 
     override func mouseExited(with event: NSEvent) {
         onHover?(false)
         if !isResizing {
-            NSCursor.arrow.set()
+            if currentCursorKind != .arrow {
+                currentCursorKind = .arrow
+                NSCursor.arrow.set()
+            }
         }
     }
 
@@ -606,6 +633,8 @@ final class WidgetWindow {
         w.hidesOnDeactivate = false
         w.alphaValue = settings.opacity
         w.ignoresMouseEvents = false
+        w.acceptsMouseMovedEvents = true
+        w.enableCursorRects()
         w.orderOut(nil)
 
         let s = view.session
@@ -935,6 +964,7 @@ private func liftRoom(_ imageSize: NSSize) -> NSSize {
         }
         layoutControls()
         updateShadowPath()
+        window.invalidateCursorRects(for: container)
     }
 
     private var targetImageRect: NSRect {
@@ -1302,17 +1332,18 @@ private var imageOrigin: NSPoint {
             return nil
         }
 
-        let d = min(24, min(R.width, R.height) / 3)
-        let bl = NSRect(x: R.minX - 6, y: R.minY - 6, width: d + 6, height: d + 6)
+        let d = min(28, min(R.width, R.height) / 3)
+        let pad: CGFloat = 8
+        let bl = NSRect(x: R.minX - pad, y: R.minY - pad, width: d + pad, height: d + pad)
         if bl.contains(point) { return .bottomLeft }
 
-        let br = NSRect(x: R.maxX - d, y: R.minY - 6, width: d + 6, height: d + 6)
+        let br = NSRect(x: R.maxX - d, y: R.minY - pad, width: d + pad, height: d + pad)
         if br.contains(point) { return .bottomRight }
 
-        let tl = NSRect(x: R.minX - 6, y: R.maxY - d, width: d + 6, height: d + 6)
+        let tl = NSRect(x: R.minX - pad, y: R.maxY - d, width: d + pad, height: d + pad)
         if tl.contains(point) { return .topLeft }
 
-        let tr = NSRect(x: R.maxX - d, y: R.maxY - d, width: d + 6, height: d + 6)
+        let tr = NSRect(x: R.maxX - d, y: R.maxY - d, width: d + pad, height: d + pad)
         if tr.contains(point) { return .topRight }
 
         return nil
@@ -1321,12 +1352,13 @@ private var imageOrigin: NSPoint {
     func cornerCursorRects() -> [(NSRect, NSCursor)] {
         let R = visualWidgetRect
         guard R.width > 40, R.height > 40 else { return [] }
-        let d = min(24, min(R.width, R.height) / 3)
+        let d = min(28, min(R.width, R.height) / 3)
+        let pad: CGFloat = 8
 
-        let bl = NSRect(x: R.minX - 6, y: R.minY - 6, width: d + 6, height: d + 6)
-        let br = NSRect(x: R.maxX - d, y: R.minY - 6, width: d + 6, height: d + 6)
-        let tl = NSRect(x: R.minX - 6, y: R.maxY - d, width: d + 6, height: d + 6)
-        let tr = NSRect(x: R.maxX - d, y: R.maxY - d, width: d + 6, height: d + 6)
+        let bl = NSRect(x: R.minX - pad, y: R.minY - pad, width: d + pad, height: d + pad)
+        let br = NSRect(x: R.maxX - d, y: R.minY - pad, width: d + pad, height: d + pad)
+        let tl = NSRect(x: R.minX - pad, y: R.maxY - d, width: d + pad, height: d + pad)
+        let tr = NSRect(x: R.maxX - d, y: R.maxY - d, width: d + pad, height: d + pad)
 
         return [
             (bl, .neswResizeCursor),
@@ -1340,6 +1372,7 @@ private var imageOrigin: NSPoint {
         container.setResizing(true)
         defer {
             container.setResizing(false)
+            container.currentCursorKind = .pointingHand
             window.invalidateCursorRects(for: container)
             NSCursor.pointingHand.set()
         }
